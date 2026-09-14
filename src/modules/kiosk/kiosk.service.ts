@@ -1,0 +1,174 @@
+import { BadRequestException, ConflictException, Inject, Injectable, InternalServerErrorException } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import { BiometricPersonEntity } from '../persons/entities/biometric-person.entity';
+import { EnrollmentEntity } from '../enrollment/entities/enrollment.entity';
+import { TemplateEntity } from '../enrollment/entities/template.entity';
+import { UserEntity } from '../auth/entities/user.entity';
+import { AccessLogEntity } from './entities/access-log.entity';
+import { VerificationService, type BiometricIdentificationResult } from '../verification/verification.service';
+import {
+  BiometricDetectionError,
+  BiometricProvider,
+  FACE_PROVIDER,
+  InvalidBiometricInputError,
+} from '../biometric-providers/biometric-provider.interface';
+import { KioskRegisterDto } from './dto/kiosk-register.dto';
+
+/** Username del usuario de sistema que queda como autor de lo registrado en el kiosco (lo siembra el script 05). */
+const KIOSK_SYSTEM_USERNAME = 'kiosk';
+
+export interface KioskIdentifyResponse {
+  matched: boolean;
+  person?: { id: number; firstName: string; lastName: string };
+  ambiguous?: boolean;
+}
+
+export interface KioskCheckInResponse {
+  granted: boolean;
+  person?: { id: number; firstName: string; lastName: string };
+  distance?: number;
+  ambiguous?: boolean;
+}
+
+@Injectable()
+export class KioskService {
+  private kioskUserId?: number;
+
+  constructor(
+    @InjectRepository(BiometricPersonEntity)
+    private readonly personRepository: Repository<BiometricPersonEntity>,
+    @InjectRepository(EnrollmentEntity)
+    private readonly enrollmentRepository: Repository<EnrollmentEntity>,
+    @InjectRepository(TemplateEntity)
+    private readonly templateRepository: Repository<TemplateEntity>,
+    @InjectRepository(AccessLogEntity)
+    private readonly accessLogRepository: Repository<AccessLogEntity>,
+    @InjectRepository(UserEntity)
+    private readonly userRepository: Repository<UserEntity>,
+    @Inject(FACE_PROVIDER)
+    private readonly faceProvider: BiometricProvider,
+    private readonly verificationService: VerificationService,
+  ) {}
+
+  /** 1:N — respuesta mínima a propósito: este endpoint es público (ver README del módulo). */
+  async identify(imageBuffer: Buffer): Promise<KioskIdentifyResponse> {
+    const result = await this.verificationService.identify('Face', imageBuffer);
+    return this.toPublicIdentifyResponse(result);
+  }
+
+  async register(dto: KioskRegisterDto, imageBuffers: Buffer[]): Promise<BiometricPersonEntity> {
+    if (imageBuffers.length === 0) {
+      throw new BadRequestException('Se requiere al menos una foto.');
+    }
+
+    // 1) ¿Esta cara ya está registrada? Evita duplicar a la persona.
+    const existingByFace = await this.verificationService.identify('Face', imageBuffers[0]);
+    if (existingByFace.matched && existingByFace.person) {
+      throw new ConflictException(
+        `Esta persona ya está registrada como ${existingByFace.person.firstName} ${existingByFace.person.lastName}. Usá "Ingresar".`,
+      );
+    }
+
+    // 2) ¿La cédula ya existe?
+    const existingByNationalId = await this.personRepository.findOne({ where: { nationalId: dto.nationalId } });
+    if (existingByNationalId) {
+      throw new ConflictException('Ya existe una persona registrada con esa cédula.');
+    }
+
+    // 3) Extraer el descriptor de cada foto; se descartan las que no tengan rostro.
+    const descriptors: number[][] = [];
+    for (const buffer of imageBuffers) {
+      try {
+        const descriptor = await this.faceProvider.extractDescriptor(buffer);
+        descriptors.push(descriptor.vector);
+      } catch (err) {
+        if (err instanceof BiometricDetectionError || err instanceof InvalidBiometricInputError) {
+          continue;
+        }
+        throw err;
+      }
+    }
+    if (descriptors.length === 0) {
+      throw new BadRequestException('No se detectó ningún rostro en las fotos. Intentá de nuevo con mejor luz y de frente.');
+    }
+
+    // 4) Crear persona + enrollment + un template por foto válida.
+    const kioskUserId = await this.getKioskUserId();
+
+    const person = await this.personRepository.save(
+      this.personRepository.create({
+        nationalId: dto.nationalId,
+        firstName: dto.firstName,
+        lastName: dto.lastName,
+        dateOfBirth: dto.dateOfBirth ?? null,
+        createdByUserId: kioskUserId,
+      }),
+    );
+
+    const enrollment = await this.enrollmentRepository.save(
+      this.enrollmentRepository.create({
+        personId: person.id,
+        modality: 'Face',
+        createdByUserId: kioskUserId,
+        status: 'Completed',
+        completedAt: new Date(),
+      }),
+    );
+
+    await this.templateRepository.save(
+      descriptors.map((vector) =>
+        this.templateRepository.create({
+          personId: person.id,
+          enrollmentId: enrollment.id,
+          modality: 'Face',
+          vectorJson: JSON.stringify(vector),
+        }),
+      ),
+    );
+
+    return person;
+  }
+
+  async checkIn(imageBuffer: Buffer, sourceIp: string | null): Promise<KioskCheckInResponse> {
+    const result = await this.verificationService.identify('Face', imageBuffer);
+
+    await this.accessLogRepository.save(
+      this.accessLogRepository.create({
+        personId: result.person?.id ?? null,
+        modality: 'Face',
+        granted: result.matched,
+        distance: result.distance ?? null,
+        sourceIp,
+      }),
+    );
+
+    const publicResult = this.toPublicIdentifyResponse(result);
+    return { granted: publicResult.matched, person: publicResult.person, distance: result.distance, ambiguous: publicResult.ambiguous };
+  }
+
+  /** Nunca devuelve la cédula ni ningún otro dato sensible: estos endpoints son públicos. */
+  private toPublicIdentifyResponse(result: BiometricIdentificationResult): KioskIdentifyResponse {
+    if (!result.matched || !result.person) {
+      return { matched: false, ambiguous: result.ambiguous };
+    }
+    return {
+      matched: true,
+      person: { id: result.person.id, firstName: result.person.firstName, lastName: result.person.lastName },
+    };
+  }
+
+  private async getKioskUserId(): Promise<number> {
+    if (this.kioskUserId) {
+      return this.kioskUserId;
+    }
+    const kioskUser = await this.userRepository.findOne({ where: { username: KIOSK_SYSTEM_USERNAME } });
+    if (!kioskUser) {
+      throw new InternalServerErrorException(
+        `No existe el usuario de sistema "${KIOSK_SYSTEM_USERNAME}". Ejecutá database/05_create_access_log_table.sql.`,
+      );
+    }
+    this.kioskUserId = kioskUser.id;
+    return this.kioskUserId;
+  }
+}
