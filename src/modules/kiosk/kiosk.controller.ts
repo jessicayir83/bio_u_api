@@ -1,22 +1,32 @@
-import {
-  BadRequestException,
-  Body,
-  Controller,
-  Ip,
-  MaxFileSizeValidator,
-  ParseFilePipe,
-  Post,
-  UploadedFile,
-  UploadedFiles,
-  UseInterceptors,
-} from '@nestjs/common';
-import { FileInterceptor, FilesInterceptor } from '@nestjs/platform-express';
+import { BadRequestException, Body, Controller, Ip, Post, UploadedFiles, UseInterceptors } from '@nestjs/common';
+import { FileFieldsInterceptor, FilesInterceptor } from '@nestjs/platform-express';
 import { Throttle } from '@nestjs/throttler';
 import { KioskService } from './kiosk.service';
 import { KioskRegisterDto } from './dto/kiosk-register.dto';
 
 const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024;
 const MAX_REGISTER_PHOTOS = 3;
+/** Frames de un mismo intento de identificación (ver VerificationService.identifyDescriptors). */
+const MAX_PROBE_PHOTOS = 3;
+
+/** identify/check-in aceptan `images` (varios frames) o `image` (uno, compatibilidad con clientes previos/Postman). */
+const probeFilesInterceptor = FileFieldsInterceptor([
+  { name: 'images', maxCount: MAX_PROBE_PHOTOS },
+  { name: 'image', maxCount: 1 },
+]);
+
+type ProbeUpload = { images?: Express.Multer.File[]; image?: Express.Multer.File[] };
+
+function toProbeBuffers(files: ProbeUpload = {}): Buffer[] {
+  const all = [...(files.images ?? []), ...(files.image ?? [])];
+  if (all.length === 0) {
+    throw new BadRequestException('Se requiere al menos una foto (campo "images" o "image").');
+  }
+  if (all.some((file) => file.size > MAX_IMAGE_SIZE_BYTES)) {
+    throw new BadRequestException('Alguna de las fotos supera el tamaño máximo permitido (5MB).');
+  }
+  return all.map((file) => file.buffer);
+}
 
 /**
  * ÚNICA superficie pública del API (sin JwtAuthGuard) — ver README del
@@ -34,12 +44,9 @@ export class KioskController {
   constructor(private readonly kioskService: KioskService) {}
 
   @Post('identify')
-  @UseInterceptors(FileInterceptor('image'))
-  identify(
-    @UploadedFile(new ParseFilePipe({ validators: [new MaxFileSizeValidator({ maxSize: MAX_IMAGE_SIZE_BYTES })] }))
-    image: Express.Multer.File,
-  ) {
-    return this.kioskService.identify(image.buffer);
+  @UseInterceptors(probeFilesInterceptor)
+  identify(@UploadedFiles() files: ProbeUpload) {
+    return this.kioskService.identify(toProbeBuffers(files));
   }
 
   // Más restrictivo que el resto: crear personas es la operación sensible.
@@ -57,12 +64,8 @@ export class KioskController {
   }
 
   @Post('check-in')
-  @UseInterceptors(FileInterceptor('image'))
-  checkIn(
-    @UploadedFile(new ParseFilePipe({ validators: [new MaxFileSizeValidator({ maxSize: MAX_IMAGE_SIZE_BYTES })] }))
-    image: Express.Multer.File,
-    @Ip() ip: string,
-  ) {
-    return this.kioskService.checkIn(image.buffer, ip ?? null);
+  @UseInterceptors(probeFilesInterceptor)
+  checkIn(@UploadedFiles() files: ProbeUpload, @Ip() ip: string) {
+    return this.kioskService.checkIn(toProbeBuffers(files), ip ?? null);
   }
 }

@@ -58,7 +58,7 @@ async function bootstrap() {
   // 0.0.0.0 para aceptar conexiones de otros dispositivos de la red (teléfono/tablet).
   await app.listen(port, '0.0.0.0');
   // eslint-disable-next-line no-console
-  console.log(`Biometric Platform API escuchando en ${httpsOptions ? 'https' : 'http'}://localhost:${port}`);
+  console.log(`Bio U API escuchando en ${httpsOptions ? 'https' : 'http'}://localhost:${port}`);
 }
 
 bootstrap();

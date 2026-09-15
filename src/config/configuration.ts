@@ -44,6 +44,13 @@ export interface AppConfig {
     bcryptSaltRounds: number;
   };
   biometrics: {
+    /**
+     * `ssd` (SsdMobilenetv1): recorte más preciso → mejor descriptor, ~2x más
+     * lento. `tiny`: el detector original de Fase 5. Cambiarlo altera los
+     * descriptores (~0.15-0.2 de distancia sobre la misma foto): conviene
+     * reenrolar tras el cambio.
+     */
+    faceDetector: 'ssd' | 'tiny';
     faceModelsPath: string;
     faceMatchThreshold: number;
     faceIdentifyMargin: number;
@@ -77,6 +84,7 @@ export default (): AppConfig => ({
     bcryptSaltRounds: parseInt(process.env.BCRYPT_SALT_ROUNDS ?? '10', 10),
   },
   biometrics: {
+    faceDetector: process.env.FACE_DETECTOR === 'tiny' ? 'tiny' : 'ssd',
     faceModelsPath: process.env.FACE_MODELS_PATH ?? 'models',
     faceMatchThreshold: parseFloat(process.env.FACE_MATCH_THRESHOLD ?? '0.6'),
     faceIdentifyMargin: parseFloat(process.env.FACE_IDENTIFY_MARGIN ?? '0.05'),

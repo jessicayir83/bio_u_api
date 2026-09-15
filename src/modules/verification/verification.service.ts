@@ -75,17 +75,17 @@ export class VerificationService {
       throw new NotFoundException(`No existe una persona con id ${personId}.`);
     }
 
-    const template = await this.templateRepository.findOne({
-      where: { personId, modality },
-      order: { createdAt: 'DESC' },
-    });
-    if (!template) {
+    // Contra TODOS los templates de la persona, quedándose con el más
+    // cercano: una persona registrada con varias fotos (ángulos/gestos
+    // distintos) se reconoce mejor que comparando solo contra la última.
+    const templates = await this.templateRepository.find({ where: { personId, modality } });
+    if (templates.length === 0) {
       throw new NotFoundException(`La persona no tiene un template ${modality} registrado.`);
     }
 
     let probe: BiometricDescriptor;
     try {
-      probe = await provider.extractDescriptor(sampleBuffer);
+      probe = await provider.extractDescriptor(sampleBuffer, { purpose: 'probe' });
     } catch (err) {
       if (err instanceof BiometricDetectionError || err instanceof InvalidBiometricInputError) {
         throw new BadRequestException(err.message);
@@ -93,16 +93,63 @@ export class VerificationService {
       throw err;
     }
 
-    const stored: BiometricDescriptor = { vector: JSON.parse(template.vectorJson) };
-    const { distance, isMatch } = provider.compare(stored, probe);
+    const { distance, isMatch } = templates
+      .map((template) => provider.compare({ vector: JSON.parse(template.vectorJson) }, probe))
+      .reduce((best, result) => (result.distance < best.distance ? result : best));
 
     return { personId, modality, isMatch, distance, threshold: this.thresholdsByModality[modality] };
   }
 
   /**
+   * Extrae descriptores de varias capturas, descartando las inválidas o de
+   * mala calidad (no corta en la primera). `firstProblem` trae el motivo de
+   * la primera descartada, para mostrárselo a la persona si no alcanza.
+   */
+  async extractValidDescriptors(
+    modality: BiometricModality,
+    sampleBuffers: Buffer[],
+    purpose: 'enrollment' | 'probe',
+  ): Promise<{ descriptors: BiometricDescriptor[]; firstProblem?: string }> {
+    const provider = this.providersByModality[modality];
+    const descriptors: BiometricDescriptor[] = [];
+    let firstProblem: string | undefined;
+
+    for (const buffer of sampleBuffers) {
+      try {
+        descriptors.push(await provider.extractDescriptor(buffer, { purpose }));
+      } catch (err) {
+        if (err instanceof BiometricDetectionError || err instanceof InvalidBiometricInputError) {
+          firstProblem ??= err.message;
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    return { descriptors, firstProblem };
+  }
+
+  /**
+   * Identificación 1:N a partir de una o varias capturas de la misma
+   * persona (ej. frames seguidos de la cámara del kiosco). Las capturas de
+   * mala calidad se descartan; si no queda ninguna → 400 con el motivo.
+   */
+  async identify(modality: BiometricModality, sampleBuffers: Buffer[]): Promise<BiometricIdentificationResult> {
+    const { descriptors, firstProblem } = await this.extractValidDescriptors(modality, sampleBuffers, 'probe');
+    if (descriptors.length === 0) {
+      throw new BadRequestException(firstProblem ?? 'No se recibió ninguna muestra.');
+    }
+    return this.identifyDescriptors(modality, descriptors);
+  }
+
+  /**
    * Identificación 1:N — "¿quién es esta persona?", sin conocer su id de
-   * antemano (lo usa el kiosco). Compara contra todos los templates de la
-   * modalidad y se queda con la menor distancia.
+   * antemano (lo usa el kiosco).
+   *
+   * Distancia de cada persona = para cada probe, su template más cercano;
+   * luego el promedio entre probes. Con un solo probe equivale a "menor
+   * distancia"; con varios, un frame malo (parpadeo, movimiento) pesa menos
+   * que en una sola foto.
    *
    * Además del umbral normal, exige un margen mínimo entre el mejor y el
    * segundo mejor candidato: si dos personas distintas quedan casi igual
@@ -113,17 +160,10 @@ export class VerificationService {
    * cual es correcto para cientos/miles de personas. Con decenas de miles
    * habría que indexar vectores.
    */
-  async identify(modality: BiometricModality, sampleBuffer: Buffer): Promise<BiometricIdentificationResult> {
+  async identifyDescriptors(modality: BiometricModality, probes: BiometricDescriptor[]): Promise<BiometricIdentificationResult> {
     const provider = this.providersByModality[modality];
-
-    let probe: BiometricDescriptor;
-    try {
-      probe = await provider.extractDescriptor(sampleBuffer);
-    } catch (err) {
-      if (err instanceof BiometricDetectionError || err instanceof InvalidBiometricInputError) {
-        throw new BadRequestException(err.message);
-      }
-      throw err;
+    if (probes.length === 0) {
+      return { matched: false };
     }
 
     const templates = await this.templateRepository.find({
@@ -131,12 +171,22 @@ export class VerificationService {
       relations: { person: true },
     });
 
-    const candidates = templates
-      .filter((template) => template.person?.isActive)
-      .map((template) => ({
-        person: template.person,
-        distance: provider.compare({ vector: JSON.parse(template.vectorJson) }, probe).distance,
-      }))
+    const vectorsByPerson = new Map<number, { person: BiometricPersonEntity; vectors: number[][] }>();
+    for (const template of templates) {
+      if (!template.person?.isActive) continue;
+      const entry = vectorsByPerson.get(template.person.id) ?? { person: template.person, vectors: [] };
+      entry.vectors.push(JSON.parse(template.vectorJson));
+      vectorsByPerson.set(template.person.id, entry);
+    }
+
+    const candidates = [...vectorsByPerson.values()]
+      .map(({ person, vectors }) => {
+        const closestPerProbe = probes.map((probe) =>
+          Math.min(...vectors.map((vector) => provider.compare({ vector }, probe).distance)),
+        );
+        const distance = closestPerProbe.reduce((sum, value) => sum + value, 0) / closestPerProbe.length;
+        return { person, distance };
+      })
       .sort((a, b) => a.distance - b.distance);
 
     if (candidates.length === 0) {
@@ -148,9 +198,8 @@ export class VerificationService {
       return { matched: false };
     }
 
-    // El segundo mejor candidato de OTRA persona (varios templates de la
-    // misma persona no compiten entre sí).
-    const runnerUp = candidates.find((candidate) => candidate.person.id !== best.person.id);
+    // Los candidatos ya están agrupados por persona: el segundo es siempre OTRA persona.
+    const runnerUp = candidates[1];
     if (runnerUp && runnerUp.distance - best.distance < this.identifyMargin) {
       return { matched: false, ambiguous: true };
     }

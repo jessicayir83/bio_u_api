@@ -1,4 +1,10 @@
-import { BadRequestException, ConflictException, Inject, Injectable, InternalServerErrorException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  InternalServerErrorException,
+  UnprocessableEntityException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { BiometricPersonEntity } from '../persons/entities/biometric-person.entity';
@@ -7,16 +13,12 @@ import { TemplateEntity } from '../enrollment/entities/template.entity';
 import { UserEntity } from '../auth/entities/user.entity';
 import { AccessLogEntity } from './entities/access-log.entity';
 import { VerificationService, type BiometricIdentificationResult } from '../verification/verification.service';
-import {
-  BiometricDetectionError,
-  BiometricProvider,
-  FACE_PROVIDER,
-  InvalidBiometricInputError,
-} from '../biometric-providers/biometric-provider.interface';
 import { KioskRegisterDto } from './dto/kiosk-register.dto';
 
 /** Username del usuario de sistema que queda como autor de lo registrado en el kiosco (lo siembra el script 05). */
 const KIOSK_SYSTEM_USERNAME = 'kiosk';
+/** Fotos de calidad suficiente que exige el registro (o todas, si se mandaron menos). */
+const MIN_VALID_REGISTER_PHOTOS = 2;
 
 export interface KioskIdentifyResponse {
   matched: boolean;
@@ -46,51 +48,50 @@ export class KioskService {
     private readonly accessLogRepository: Repository<AccessLogEntity>,
     @InjectRepository(UserEntity)
     private readonly userRepository: Repository<UserEntity>,
-    @Inject(FACE_PROVIDER)
-    private readonly faceProvider: BiometricProvider,
     private readonly verificationService: VerificationService,
   ) {}
 
   /** 1:N — respuesta mínima a propósito: este endpoint es público (ver README del módulo). */
-  async identify(imageBuffer: Buffer): Promise<KioskIdentifyResponse> {
-    const result = await this.verificationService.identify('Face', imageBuffer);
+  async identify(imageBuffers: Buffer[]): Promise<KioskIdentifyResponse> {
+    const result = await this.verificationService.identify('Face', imageBuffers);
     return this.toPublicIdentifyResponse(result);
   }
 
+  /**
+   * Los problemas con las fotos responden 422 (no 400) para que la pantalla
+   * distinga "volvé a sacar las fotos" de un error en los datos del formulario.
+   */
   async register(dto: KioskRegisterDto, imageBuffers: Buffer[]): Promise<BiometricPersonEntity> {
     if (imageBuffers.length === 0) {
       throw new BadRequestException('Se requiere al menos una foto.');
     }
 
-    // 1) ¿Esta cara ya está registrada? Evita duplicar a la persona.
-    const existingByFace = await this.verificationService.identify('Face', imageBuffers[0]);
+    // 1) Descriptores con controles de calidad estrictos: estas fotos quedan
+    //    como referencia de la persona para todos sus ingresos futuros.
+    const { descriptors, firstProblem } = await this.verificationService.extractValidDescriptors(
+      'Face',
+      imageBuffers,
+      'enrollment',
+    );
+    const requiredValid = Math.min(MIN_VALID_REGISTER_PHOTOS, imageBuffers.length);
+    if (descriptors.length < requiredValid) {
+      throw new UnprocessableEntityException(
+        `Solo ${descriptors.length} de ${imageBuffers.length} fotos sirven. ${firstProblem ?? ''} Volvé a sacar las fotos.`.trim(),
+      );
+    }
+
+    // 2) ¿Esta cara ya está registrada? Con todas las fotos válidas, no solo la primera.
+    const existingByFace = await this.verificationService.identifyDescriptors('Face', descriptors);
     if (existingByFace.matched && existingByFace.person) {
       throw new ConflictException(
         `Esta persona ya está registrada como ${existingByFace.person.firstName} ${existingByFace.person.lastName}. Usá "Ingresar".`,
       );
     }
 
-    // 2) ¿La cédula ya existe?
+    // 3) ¿La cédula ya existe?
     const existingByNationalId = await this.personRepository.findOne({ where: { nationalId: dto.nationalId } });
     if (existingByNationalId) {
       throw new ConflictException('Ya existe una persona registrada con esa cédula.');
-    }
-
-    // 3) Extraer el descriptor de cada foto; se descartan las que no tengan rostro.
-    const descriptors: number[][] = [];
-    for (const buffer of imageBuffers) {
-      try {
-        const descriptor = await this.faceProvider.extractDescriptor(buffer);
-        descriptors.push(descriptor.vector);
-      } catch (err) {
-        if (err instanceof BiometricDetectionError || err instanceof InvalidBiometricInputError) {
-          continue;
-        }
-        throw err;
-      }
-    }
-    if (descriptors.length === 0) {
-      throw new BadRequestException('No se detectó ningún rostro en las fotos. Intentá de nuevo con mejor luz y de frente.');
     }
 
     // 4) Crear persona + enrollment + un template por foto válida.
@@ -117,12 +118,12 @@ export class KioskService {
     );
 
     await this.templateRepository.save(
-      descriptors.map((vector) =>
+      descriptors.map((descriptor) =>
         this.templateRepository.create({
           personId: person.id,
           enrollmentId: enrollment.id,
           modality: 'Face',
-          vectorJson: JSON.stringify(vector),
+          vectorJson: JSON.stringify(descriptor.vector),
         }),
       ),
     );
@@ -130,8 +131,8 @@ export class KioskService {
     return person;
   }
 
-  async checkIn(imageBuffer: Buffer, sourceIp: string | null): Promise<KioskCheckInResponse> {
-    const result = await this.verificationService.identify('Face', imageBuffer);
+  async checkIn(imageBuffers: Buffer[], sourceIp: string | null): Promise<KioskCheckInResponse> {
+    const result = await this.verificationService.identify('Face', imageBuffers);
 
     await this.accessLogRepository.save(
       this.accessLogRepository.create({

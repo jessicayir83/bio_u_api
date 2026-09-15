@@ -96,7 +96,8 @@ export class EnrollmentService {
 
     let descriptor;
     try {
-      descriptor = await provider.extractDescriptor(sampleBuffer);
+      // Controles de calidad estrictos: esta muestra queda como referencia de la persona.
+      descriptor = await provider.extractDescriptor(sampleBuffer, { purpose: 'enrollment' });
     } catch (err) {
       if (err instanceof BiometricDetectionError || err instanceof InvalidBiometricInputError) {
         throw new BadRequestException(err.message);
