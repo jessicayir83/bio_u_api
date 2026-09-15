@@ -7,6 +7,7 @@ import { UserEntity } from '../auth/entities/user.entity';
 import { RoleEntity } from '../auth/entities/role.entity';
 import { UserRoleEntity } from '../auth/entities/user-role.entity';
 import { AuthService } from '../auth/auth.service';
+import { AuditService } from '../audit/audit.service';
 import { AppConfig } from '../../config/configuration';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
@@ -30,6 +31,7 @@ export class UsersService {
     @InjectRepository(RoleEntity) private readonly roleRepository: Repository<RoleEntity>,
     @InjectRepository(UserRoleEntity) private readonly userRoleRepository: Repository<UserRoleEntity>,
     private readonly authService: AuthService,
+    private readonly auditService: AuditService,
     configService: ConfigService,
   ) {
     this.bcryptSaltRounds = configService.get<AppConfig['auth']>('auth')!.bcryptSaltRounds;
@@ -73,6 +75,13 @@ export class UsersService {
 
     await this.userRoleRepository.save(roles.map((role) => this.userRoleRepository.create({ userId: user.id, roleId: role.id })));
 
+    const roleNames = roles.map((role) => role.name);
+    this.auditService.annotate({
+      eventType: roleNames.includes('Admin') ? 'USER_ADMIN_ROLE_GRANTED' : 'USER_CREATED',
+      targetType: 'User',
+      targetId: user.id,
+      details: { action: 'CREATE', username: user.username, roles: roleNames },
+    });
     return this.findOne(user.id);
   }
 
@@ -81,6 +90,7 @@ export class UsersService {
     if (!user) {
       throw new NotFoundException(`No existe un usuario con id ${id}.`);
     }
+    const before = await this.findOne(id);
 
     if (dto.email && dto.email !== user.email) {
       const emailTaken = await this.userRepository.findOne({ where: { email: dto.email } });
@@ -105,7 +115,21 @@ export class UsersService {
       await this.userRoleRepository.save(roles.map((role) => this.userRoleRepository.create({ userId: id, roleId: role.id })));
     }
 
-    return this.findOne(id);
+    const after = await this.findOne(id);
+    const rolesAdded = after.roles.filter((role) => !before.roles.includes(role));
+    const rolesRemoved = before.roles.filter((role) => !after.roles.includes(role));
+    const changedFields = (['email', 'fullName'] as const).filter((field) => before[field] !== after[field]);
+    this.auditService.annotate({
+      eventType: rolesAdded.includes('Admin')
+        ? 'USER_ADMIN_ROLE_GRANTED'
+        : rolesRemoved.includes('Admin')
+          ? 'USER_ADMIN_ROLE_REVOKED'
+          : 'USER_UPDATED',
+      targetType: 'User',
+      targetId: id,
+      details: { action: 'UPDATE', username: after.username, changedFields, rolesAdded, rolesRemoved },
+    });
+    return after;
   }
 
   async deactivate(id: number): Promise<void> {
@@ -115,6 +139,7 @@ export class UsersService {
     }
     user.isActive = false;
     await this.userRepository.save(user);
+    this.auditService.annotate({ eventType: 'USER_DEACTIVATED', targetType: 'User', targetId: id, details: { username: user.username } });
   }
 
   async activate(id: number): Promise<UserSummary> {
@@ -124,6 +149,7 @@ export class UsersService {
     }
     user.isActive = true;
     await this.userRepository.save(user);
+    this.auditService.annotate({ eventType: 'USER_ACTIVATED', targetType: 'User', targetId: id, details: { username: user.username } });
     return this.findOne(id);
   }
 
@@ -145,6 +171,12 @@ export class UsersService {
     user.passwordHash = await bcrypt.hash(newPassword, this.bcryptSaltRounds);
     await this.userRepository.save(user);
     await this.authService.revokeAllSessions(id);
+    this.auditService.annotate({
+      eventType: 'USER_PASSWORD_RESET',
+      targetType: 'User',
+      targetId: id,
+      details: { username: user.username, sessionsRevoked: true },
+    });
   }
 
   private toSummary(user: UserEntity): UserSummary {

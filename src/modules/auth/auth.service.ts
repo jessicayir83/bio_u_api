@@ -9,6 +9,7 @@ import { UserEntity } from './entities/user.entity';
 import { RefreshTokenEntity } from './entities/refresh-token.entity';
 import { AppConfig } from '../../config/configuration';
 import { AuthResponse, AuthTokens } from './interfaces/auth-response.interface';
+import { AuditService } from '../audit/audit.service';
 
 @Injectable()
 export class AuthService {
@@ -20,6 +21,7 @@ export class AuthService {
     @InjectRepository(RefreshTokenEntity)
     private readonly refreshTokenRepository: Repository<RefreshTokenEntity>,
     private readonly jwtService: JwtService,
+    private readonly auditService: AuditService,
     configService: ConfigService,
   ) {
     this.authConfig = configService.get<AppConfig['auth']>('auth')!;
@@ -27,7 +29,8 @@ export class AuthService {
 
   /**
    * No distingue "usuario no existe" de "password incorrecta" para evitar
-   * enumeración de usuarios.
+   * enumeración de usuarios (la respuesta es la misma). La auditoría sí
+   * guarda el motivo real, porque solo la ve un Admin.
    */
   async validateUser(username: string, password: string): Promise<UserEntity> {
     const user = await this.userRepository.findOne({
@@ -38,6 +41,22 @@ export class AuthService {
     const passwordMatches = user ? await bcrypt.compare(password, user.passwordHash) : false;
 
     if (!user || !user.isActive || !passwordMatches) {
+      if (user && !user.isActive) {
+        // Incluye intentos con la cuenta de sistema `kiosk`, que está inactiva a propósito.
+        this.auditService.annotate({
+          eventType: 'AUTH_LOGIN_INACTIVE_ACCOUNT',
+          actorUserId: user.id,
+          actorUsername: user.username,
+          details: { passwordMatched: passwordMatches },
+        });
+      } else {
+        this.auditService.annotate({
+          eventType: 'AUTH_LOGIN_FAILED',
+          actorUserId: user?.id,
+          actorUsername: username,
+          details: { reason: user ? 'BAD_PASSWORD' : 'USER_NOT_FOUND' },
+        });
+      }
       throw new UnauthorizedException('Credenciales inválidas.');
     }
 
@@ -47,6 +66,18 @@ export class AuthService {
   async login(user: UserEntity): Promise<AuthResponse> {
     const roles = user.userRoles.map((userRole) => userRole.role.name);
     const tokens = await this.issueTokens(user.id, user.username, roles);
+
+    // "IP inusual": primera vez que esta cuenta entra desde esta IP (si ya tenía historial).
+    const history = await this.auditService.loginHistory(user.id, this.auditService.currentSourceIp());
+    const isNewIp = history.hasPreviousLogins && !history.hasLoginFromIp;
+    this.auditService.annotate({
+      eventType: isNewIp ? 'AUTH_LOGIN_NEW_IP' : 'AUTH_LOGIN_SUCCESS',
+      // Una cuenta Admin entrando desde una IP nueva merece más atención.
+      severity: isNewIp && roles.includes('Admin') ? 'SEV2' : undefined,
+      actorUserId: user.id,
+      actorUsername: user.username,
+      details: { roles, previousLastLoginAt: user.lastLoginAt },
+    });
 
     user.lastLoginAt = new Date();
     await this.userRepository.save(user);
@@ -70,15 +101,26 @@ export class AuthService {
     });
 
     if (!existing) {
+      this.auditService.annotate({ eventType: 'AUTH_REFRESH_FAILED', details: { reason: 'TOKEN_NOT_FOUND' } });
       throw new UnauthorizedException('Refresh token inválido.');
     }
 
+    const actor = { actorUserId: existing.userId, actorUsername: existing.user?.username };
+
     if (existing.revokedAt) {
       await this.revokeAllSessions(existing.userId);
+      this.auditService.annotate({
+        eventType: 'AUTH_REFRESH_TOKEN_REUSE',
+        ...actor,
+        targetType: 'User',
+        targetId: existing.userId,
+        details: { tokenRevokedAt: existing.revokedAt, allSessionsRevoked: true },
+      });
       throw new UnauthorizedException('Refresh token inválido.');
     }
 
     if (existing.expiresAt.getTime() < Date.now()) {
+      this.auditService.annotate({ eventType: 'AUTH_REFRESH_FAILED', ...actor, details: { reason: 'TOKEN_EXPIRED' } });
       throw new UnauthorizedException('Refresh token expirado.');
     }
 
@@ -89,6 +131,7 @@ export class AuthService {
     existing.replacedByTokenHash = this.hashToken(tokens.refreshToken);
     await this.refreshTokenRepository.save(existing);
 
+    this.auditService.annotate({ eventType: 'AUTH_TOKEN_REFRESHED', ...actor });
     return tokens;
   }
 
@@ -97,10 +140,16 @@ export class AuthService {
     const existing = await this.refreshTokenRepository.findOne({ where: { tokenHash } });
 
     if (!existing) {
+      this.auditService.annotate({ eventType: 'AUTH_LOGOUT', details: { tokenFound: false } });
       return;
     }
 
     if (existing.userId !== userId) {
+      this.auditService.annotate({
+        eventType: 'AUTH_ACCESS_DENIED_ROLE',
+        message: 'Intento de cerrar la sesión de otro usuario con su refresh token',
+        details: { tokenOwnerUserId: existing.userId },
+      });
       throw new ForbiddenException('El refresh token no pertenece al usuario autenticado.');
     }
 
@@ -108,6 +157,7 @@ export class AuthService {
       existing.revokedAt = new Date();
       await this.refreshTokenRepository.save(existing);
     }
+    this.auditService.annotate({ eventType: 'AUTH_LOGOUT' });
   }
 
   /**
@@ -127,15 +177,18 @@ export class AuthService {
     }
 
     if (!(await bcrypt.compare(currentPassword, user.passwordHash))) {
+      this.auditService.annotate({ eventType: 'AUTH_PASSWORD_CHANGE_FAILED', details: { reason: 'WRONG_CURRENT_PASSWORD' } });
       throw new BadRequestException('La contraseña actual es incorrecta.');
     }
     if (await bcrypt.compare(newPassword, user.passwordHash)) {
+      this.auditService.annotate({ eventType: 'AUTH_PASSWORD_CHANGE_FAILED', details: { reason: 'SAME_AS_CURRENT' } });
       throw new BadRequestException('La nueva contraseña debe ser distinta de la actual.');
     }
 
     user.passwordHash = await bcrypt.hash(newPassword, this.authConfig.bcryptSaltRounds);
     await this.userRepository.save(user);
     await this.revokeAllSessions(user.id);
+    this.auditService.annotate({ eventType: 'AUTH_PASSWORD_CHANGED', targetType: 'User', targetId: user.id, details: { otherSessionsRevoked: true } });
 
     const roles = user.userRoles.map((userRole) => userRole.role.name);
     return this.issueTokens(user.id, user.username, roles);

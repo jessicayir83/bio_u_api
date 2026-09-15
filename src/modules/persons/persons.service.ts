@@ -6,6 +6,7 @@ import { PersonIdentifierEntity } from './entities/person-identifier.entity';
 import { CreatePersonDto } from './dto/create-person.dto';
 import { UpdatePersonDto } from './dto/update-person.dto';
 import { CreatePersonIdentifierDto } from './dto/create-person-identifier.dto';
+import { AuditService } from '../audit/audit.service';
 
 @Injectable()
 export class PersonsService {
@@ -14,6 +15,7 @@ export class PersonsService {
     private readonly personRepository: Repository<BiometricPersonEntity>,
     @InjectRepository(PersonIdentifierEntity)
     private readonly identifierRepository: Repository<PersonIdentifierEntity>,
+    private readonly auditService: AuditService,
   ) {}
 
   async create(dto: CreatePersonDto, createdByUserId: number): Promise<BiometricPersonEntity> {
@@ -22,19 +24,22 @@ export class PersonsService {
       throw new ConflictException('Ya existe una persona registrada con esa cédula.');
     }
 
-    const person = this.personRepository.create({ ...dto, createdByUserId });
-    return this.personRepository.save(person);
+    const person = await this.personRepository.save(this.personRepository.create({ ...dto, createdByUserId }));
+    // Nunca valores de datos personales en la auditoría: solo el id del registro.
+    this.auditService.annotate({ eventType: 'PERSON_CREATED', targetType: 'Person', targetId: person.id });
+    return person;
   }
 
   async findAll(search?: string): Promise<BiometricPersonEntity[]> {
-    if (!search) {
-      return this.personRepository.find({ order: { createdAt: 'DESC' } });
-    }
-
-    return this.personRepository.find({
-      where: [{ nationalId: Like(`%${search}%`) }, { lastName: Like(`%${search}%`) }],
-      order: { createdAt: 'DESC' },
-    });
+    const persons = !search
+      ? await this.personRepository.find({ order: { createdAt: 'DESC' } })
+      : await this.personRepository.find({
+          where: [{ nationalId: Like(`%${search}%`) }, { lastName: Like(`%${search}%`) }],
+          order: { createdAt: 'DESC' },
+        });
+    // El término buscado puede ser una cédula: se registra que hubo búsqueda, no su valor.
+    this.auditService.annotate({ eventType: 'PERSON_LISTED', details: { searched: !!search, resultCount: persons.length } });
+    return persons;
   }
 
   async findOne(id: number): Promise<BiometricPersonEntity> {
@@ -47,8 +52,18 @@ export class PersonsService {
 
   async update(id: number, dto: UpdatePersonDto): Promise<BiometricPersonEntity> {
     const person = await this.findOne(id);
+    const changedFields = (Object.keys(dto) as Array<keyof UpdatePersonDto>).filter(
+      (field) => dto[field] !== undefined && String(dto[field]) !== String(person[field] ?? ''),
+    );
+    const wasActive = person.isActive;
     Object.assign(person, dto);
     await this.personRepository.save(person);
+    this.auditService.annotate({
+      eventType: wasActive && dto.isActive === false ? 'PERSON_DEACTIVATED' : 'PERSON_UPDATED',
+      targetType: 'Person',
+      targetId: id,
+      details: { changedFields, reactivated: !wasActive && dto.isActive === true },
+    });
     return this.findOne(id);
   }
 
@@ -57,6 +72,7 @@ export class PersonsService {
     const person = await this.findOne(id);
     person.isActive = false;
     await this.personRepository.save(person);
+    this.auditService.annotate({ eventType: 'PERSON_DEACTIVATED', targetType: 'Person', targetId: id });
   }
 
   async addIdentifier(personId: number, dto: CreatePersonIdentifierDto): Promise<PersonIdentifierEntity> {
@@ -69,8 +85,14 @@ export class PersonsService {
       throw new ConflictException('Ya existe un identificador con ese tipo y valor.');
     }
 
-    const identifier = this.identifierRepository.create({ ...dto, personId });
-    return this.identifierRepository.save(identifier);
+    const identifier = await this.identifierRepository.save(this.identifierRepository.create({ ...dto, personId }));
+    this.auditService.annotate({
+      eventType: 'PERSON_IDENTIFIER_ADDED',
+      targetType: 'Person',
+      targetId: personId,
+      details: { identifierId: identifier.id, identifierType: dto.identifierType },
+    });
+    return identifier;
   }
 
   async removeIdentifier(personId: number, identifierId: number): Promise<void> {
@@ -79,5 +101,11 @@ export class PersonsService {
       throw new NotFoundException(`No existe el identificador ${identifierId} para la persona ${personId}.`);
     }
     await this.identifierRepository.remove(identifier);
+    this.auditService.annotate({
+      eventType: 'PERSON_IDENTIFIER_REMOVED',
+      targetType: 'Person',
+      targetId: personId,
+      details: { identifierId, identifierType: identifier.identifierType },
+    });
   }
 }

@@ -11,8 +11,8 @@ import { EnrollmentModule } from './modules/enrollment/enrollment.module';
 import { UsersModule } from './modules/users/users.module';
 import { VerificationModule } from './modules/verification/verification.module';
 import { KioskModule } from './modules/kiosk/kiosk.module';
-
-// Fase 6+: aquí se irá agregando AuditModule.
+import { AuditModule } from './modules/audit/audit.module';
+import { IpBlockingModule } from './modules/ip-blocking/ip-blocking.module';
 
 @Module({
   imports: [
@@ -24,6 +24,9 @@ import { KioskModule } from './modules/kiosk/kiosk.module';
     // Límite global por IP; el kiosco (público) lo ajusta con @Throttle.
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 120 }]),
     DatabaseModule,
+    // Global: todos los módulos pueden inyectar AuditService (Fase 9).
+    AuditModule,
+    IpBlockingModule,
     HealthModule,
     AuthModule,
     PersonsModule,

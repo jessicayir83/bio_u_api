@@ -13,6 +13,7 @@ import {
   InvalidBiometricInputError,
 } from '../biometric-providers/biometric-provider.interface';
 import { AppConfig } from '../../config/configuration';
+import { AuditService } from '../audit/audit.service';
 
 const SUPPORTED_MODALITIES = ['Face', 'Fingerprint'] as const;
 export type BiometricModality = (typeof SUPPORTED_MODALITIES)[number];
@@ -56,6 +57,7 @@ export class VerificationService {
     @Inject(FINGERPRINT_PROVIDER)
     fingerprintProvider: BiometricProvider,
     configService: ConfigService,
+    private readonly auditService: AuditService,
   ) {
     const biometrics = configService.get<AppConfig['biometrics']>('biometrics')!;
     this.providersByModality = { Face: faceProvider, Fingerprint: fingerprintProvider };
@@ -88,6 +90,12 @@ export class VerificationService {
       probe = await provider.extractDescriptor(sampleBuffer, { purpose: 'probe' });
     } catch (err) {
       if (err instanceof BiometricDetectionError || err instanceof InvalidBiometricInputError) {
+        this.auditService.annotate({
+          eventType: 'VERIFICATION_REJECTED',
+          targetType: 'Person',
+          targetId: personId,
+          details: { modality, reason: err.message },
+        });
         throw new BadRequestException(err.message);
       }
       throw err;
@@ -97,7 +105,14 @@ export class VerificationService {
       .map((template) => provider.compare({ vector: JSON.parse(template.vectorJson) }, probe))
       .reduce((best, result) => (result.distance < best.distance ? result : best));
 
-    return { personId, modality, isMatch, distance, threshold: this.thresholdsByModality[modality] };
+    const threshold = this.thresholdsByModality[modality];
+    this.auditService.annotate({
+      eventType: isMatch ? 'VERIFICATION_MATCH' : 'VERIFICATION_NO_MATCH',
+      targetType: 'Person',
+      targetId: personId,
+      details: { modality, distance, threshold, templatesCompared: templates.length },
+    });
+    return { personId, modality, isMatch, distance, threshold };
   }
 
   /**

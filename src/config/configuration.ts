@@ -43,6 +43,19 @@ export interface AppConfig {
     audience: string;
     bcryptSaltRounds: number;
   };
+  /** Auditoría (Fase 9) — ver api/src/modules/audit/README.md. */
+  audit: {
+    /** Si falla la escritura en la base, el evento se agrega a este archivo JSONL para no perderlo. */
+    fallbackFile: string;
+    /** SEV1 por ráfaga: N intentos (login, kiosco, 404, 429, 401, 403) de una misma IP dentro de la ventana. */
+    burstThreshold: number;
+    burstWindowSeconds: number;
+    /** SEV1 por escaneo de rutas: N respuestas 404 de una misma IP dentro de la ventana de ráfaga. */
+    scanThreshold: number;
+    /** SEV2 por fallos repetidos: N fallos (registro/ingreso del kiosco, login de una cuenta) dentro de la ventana. */
+    repeatedFailureThreshold: number;
+    repeatedFailureWindowMinutes: number;
+  };
   biometrics: {
     /**
      * `ssd` (SsdMobilenetv1): recorte más preciso → mejor descriptor, ~2x más
@@ -82,6 +95,14 @@ export default (): AppConfig => ({
     issuer: process.env.JWT_ISSUER ?? 'biometric-platform-api',
     audience: process.env.JWT_AUDIENCE ?? 'biometric-platform-clients',
     bcryptSaltRounds: parseInt(process.env.BCRYPT_SALT_ROUNDS ?? '10', 10),
+  },
+  audit: {
+    fallbackFile: process.env.AUDIT_FALLBACK_FILE ?? 'logs/audit-fallback.jsonl',
+    burstThreshold: parseInt(process.env.AUDIT_BURST_THRESHOLD ?? '10', 10),
+    burstWindowSeconds: parseInt(process.env.AUDIT_BURST_WINDOW_SECONDS ?? '60', 10),
+    scanThreshold: parseInt(process.env.AUDIT_SCAN_THRESHOLD ?? '20', 10),
+    repeatedFailureThreshold: parseInt(process.env.AUDIT_REPEATED_FAILURE_THRESHOLD ?? '5', 10),
+    repeatedFailureWindowMinutes: parseInt(process.env.AUDIT_REPEATED_FAILURE_WINDOW_MINUTES ?? '10', 10),
   },
   biometrics: {
     faceDetector: process.env.FACE_DETECTOR === 'tiny' ? 'tiny' : 'ssd',

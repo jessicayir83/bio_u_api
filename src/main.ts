@@ -6,7 +6,11 @@ import type { HttpsOptions } from '@nestjs/common/interfaces/external/https-opti
 import * as fs from 'fs';
 import * as path from 'path';
 import { AppModule } from './app.module';
-import configuration, { getEncryptionKeyBuffer } from './config/configuration';
+import configuration, { AppConfig, getEncryptionKeyBuffer } from './config/configuration';
+import { AuditService } from './modules/audit/audit.service';
+import { createAuditHttpMiddleware } from './modules/audit/audit-http.middleware';
+import { IpBlockService } from './modules/ip-blocking/ip-block.service';
+import { createIpBlockMiddleware } from './modules/ip-blocking/ip-block.middleware';
 
 /**
  * HTTPS opcional (HTTPS_ENABLED=true): la cámara del kiosco solo funciona
@@ -50,6 +54,18 @@ async function bootstrap() {
   // entre todos los visitantes y AccessLog guarda siempre localhost.
   app.set('trust proxy', configService.get<string>('trustProxy') ?? 'loopback');
 
+  // Auditoría de CADA request (Fase 9). Registrado acá con app.use y no como
+  // middleware de módulo: así queda antes de los parsers de body que Nest
+  // agrega en listen(), y audita también requests que fallan temprano.
+  const auditService = app.get(AuditService);
+  app.use(createAuditHttpMiddleware(auditService));
+  // IPs bloqueadas por un Admin (dashboard de auditoría): 403 en todo el API.
+  // Después del de auditoría para que el intento rechazado también quede registrado.
+  app.use(createIpBlockMiddleware(app.get(IpBlockService), auditService));
+
+  // Permite auditar el apagado del API (SYSTEM_SHUTDOWN) ante Ctrl+C / reinicio.
+  app.enableShutdownHooks();
+
   // Valida y transforma automáticamente los DTOs marcados con class-validator.
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
 
@@ -59,6 +75,13 @@ async function bootstrap() {
   await app.listen(port, '0.0.0.0');
   // eslint-disable-next-line no-console
   console.log(`Bio U API escuchando en ${httpsOptions ? 'https' : 'http'}://localhost:${port}`);
+  await auditService.recordSystemStartup({
+    port,
+    https: !!httpsOptions,
+    nodeEnv: configService.get<string>('nodeEnv'),
+    faceDetector: configService.get<AppConfig['biometrics']>('biometrics')?.faceDetector,
+    pid: process.pid,
+  });
 }
 
 bootstrap();

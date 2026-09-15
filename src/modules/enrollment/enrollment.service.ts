@@ -13,6 +13,7 @@ import {
   FINGERPRINT_PROVIDER,
   InvalidBiometricInputError,
 } from '../biometric-providers/biometric-provider.interface';
+import { AuditService } from '../audit/audit.service';
 
 const SUPPORTED_MODALITIES = ['Face', 'Fingerprint'] as const;
 type SupportedModality = (typeof SUPPORTED_MODALITIES)[number];
@@ -32,6 +33,7 @@ export class EnrollmentService {
     faceProvider: BiometricProvider,
     @Inject(FINGERPRINT_PROVIDER)
     fingerprintProvider: BiometricProvider,
+    private readonly auditService: AuditService,
   ) {
     this.providersByModality = { Face: faceProvider, Fingerprint: fingerprintProvider };
   }
@@ -45,12 +47,20 @@ export class EnrollmentService {
       throw new BadRequestException('No se puede crear un enrollment para una persona inactiva.');
     }
 
-    const enrollment = this.enrollmentRepository.create({
-      personId: dto.personId,
-      modality: dto.modality,
-      createdByUserId,
+    const enrollment = await this.enrollmentRepository.save(
+      this.enrollmentRepository.create({
+        personId: dto.personId,
+        modality: dto.modality,
+        createdByUserId,
+      }),
+    );
+    this.auditService.annotate({
+      eventType: 'ENROLLMENT_CREATED',
+      targetType: 'Enrollment',
+      targetId: enrollment.id,
+      details: { personId: dto.personId, modality: dto.modality },
     });
-    return this.enrollmentRepository.save(enrollment);
+    return enrollment;
   }
 
   async findAll(personId?: number, status?: string): Promise<EnrollmentEntity[]> {
@@ -71,11 +81,19 @@ export class EnrollmentService {
 
   async updateStatus(id: number, dto: UpdateEnrollmentStatusDto): Promise<EnrollmentEntity> {
     const enrollment = await this.findOne(id);
+    const previousStatus = enrollment.status;
     enrollment.status = dto.status;
     if (dto.status === 'Completed') {
       enrollment.completedAt = new Date();
     }
-    return this.enrollmentRepository.save(enrollment);
+    const saved = await this.enrollmentRepository.save(enrollment);
+    this.auditService.annotate({
+      eventType: dto.status === 'Revoked' ? 'ENROLLMENT_REVOKED' : 'ENROLLMENT_STATUS_CHANGED',
+      targetType: 'Enrollment',
+      targetId: id,
+      details: { personId: enrollment.personId, modality: enrollment.modality, from: previousStatus, to: dto.status },
+    });
+    return saved;
   }
 
   /**
@@ -100,6 +118,12 @@ export class EnrollmentService {
       descriptor = await provider.extractDescriptor(sampleBuffer, { purpose: 'enrollment' });
     } catch (err) {
       if (err instanceof BiometricDetectionError || err instanceof InvalidBiometricInputError) {
+        this.auditService.annotate({
+          eventType: 'BIOMETRIC_CAPTURE_REJECTED',
+          targetType: 'Enrollment',
+          targetId: id,
+          details: { personId: enrollment.personId, modality: enrollment.modality, reason: err.message },
+        });
         throw new BadRequestException(err.message);
       }
       throw err;
@@ -115,6 +139,13 @@ export class EnrollmentService {
 
     enrollment.status = 'Completed';
     enrollment.completedAt = new Date();
-    return this.enrollmentRepository.save(enrollment);
+    const saved = await this.enrollmentRepository.save(enrollment);
+    this.auditService.annotate({
+      eventType: 'BIOMETRIC_CAPTURED',
+      targetType: 'Enrollment',
+      targetId: id,
+      details: { personId: enrollment.personId, modality: enrollment.modality, templateId: template.id },
+    });
+    return saved;
   }
 }
