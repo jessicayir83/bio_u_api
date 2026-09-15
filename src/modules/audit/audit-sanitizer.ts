@@ -5,7 +5,7 @@
 
 /** Claves cuyo valor se reemplaza por "[REDACTED]" (coincidencia parcial, sin distinguir mayúsculas). */
 const REDACTED_KEY_PATTERN =
-  /pass(word)?|token|secret|authorization|cookie|vector|descriptor|template|image|photo|buffer|nationalid|cedula|firstname|lastname|dateofbirth|identifiervalue/i;
+  /pass(word)?|token|secret|authorization|cookie|vector|descriptor|template|image|photo|buffer|nationalid|identificationnumber|cedula|firstname|lastname|dateofbirth|identifiervalue/i;
 
 const MAX_STRING_LENGTH = 500;
 const MAX_DEPTH = 5;

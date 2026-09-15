@@ -44,6 +44,16 @@ export class PersonsController {
     return this.personsService.findOne(id);
   }
 
+  @Get(':id/scans')
+  findScans(@Param('id', ParseIntPipe) id: number) {
+    return this.personsService.findScans(id);
+  }
+
+  @Get(':id/registrations')
+  findRegistrations(@Param('id', ParseIntPipe) id: number) {
+    return this.personsService.findRegistrations(id);
+  }
+
   @Patch(':id')
   @UseGuards(RolesGuard)
   @Roles('Admin', 'Operator')

@@ -59,7 +59,7 @@ interface AuthenticatedRequestUser {
 /** Lecturas frecuentes que no anotan ningún servicio: se tipifican por ruta. */
 const READ_ROUTE_EVENT_TYPES: Array<{ pattern: RegExp; eventType: AuditEventType; targetType?: string }> = [
   { pattern: /^\/persons$/, eventType: 'PERSON_LISTED' },
-  { pattern: /^\/persons\/(\d+)$/, eventType: 'PERSON_VIEWED', targetType: 'Person' },
+  { pattern: /^\/persons\/(\d+)(?:\/(?:scans|registrations))?$/, eventType: 'PERSON_VIEWED', targetType: 'Person' },
   { pattern: /^\/users$/, eventType: 'USER_LISTED' },
   { pattern: /^\/users\/(\d+)$/, eventType: 'USER_VIEWED', targetType: 'User' },
   { pattern: /^\/roles$/, eventType: 'ROLE_LISTED' },

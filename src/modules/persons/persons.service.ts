@@ -7,6 +7,8 @@ import { CreatePersonDto } from './dto/create-person.dto';
 import { UpdatePersonDto } from './dto/update-person.dto';
 import { CreatePersonIdentifierDto } from './dto/create-person-identifier.dto';
 import { AuditService } from '../audit/audit.service';
+import { PersonRegistrationService, isUniqueViolation } from './person-registration.service';
+import { AccessLogEntity } from '../kiosk/entities/access-log.entity';
 
 @Injectable()
 export class PersonsService {
@@ -16,17 +18,61 @@ export class PersonsService {
     @InjectRepository(PersonIdentifierEntity)
     private readonly identifierRepository: Repository<PersonIdentifierEntity>,
     private readonly auditService: AuditService,
+    private readonly registrationService: PersonRegistrationService,
+    @InjectRepository(AccessLogEntity)
+    private readonly accessLogRepository: Repository<AccessLogEntity>,
   ) {}
 
   async create(dto: CreatePersonDto, createdByUserId: number): Promise<BiometricPersonEntity> {
-    const existing = await this.personRepository.findOne({ where: { nationalId: dto.nationalId } });
+    const identification = this.registrationService.resolveIdentification(dto.identificationType, dto.nationalId);
+
+    const existing = await this.personRepository.findOne({ where: identification });
     if (existing) {
-      throw new ConflictException('Ya existe una persona registrada con esa cédula.');
+      await this.registrationService.record({
+        channel: 'PANEL',
+        status: 'DUPLICATE_ID',
+        identification,
+        personId: existing.id,
+        createdByUserId,
+        detail: 'La identificación ya pertenece a una persona registrada.',
+      });
+      throw new ConflictException('Ya existe una persona registrada con ese tipo y número de identificación.');
     }
 
-    const person = await this.personRepository.save(this.personRepository.create({ ...dto, createdByUserId }));
+    let person: BiometricPersonEntity;
+    try {
+      person = await this.personRepository.save(
+        this.personRepository.create({
+          identificationType: identification.identificationType,
+          nationalId: identification.nationalId,
+          firstName: dto.firstName.trim(),
+          lastName: dto.lastName.trim(),
+          dateOfBirth: dto.dateOfBirth ?? null,
+          createdByUserId,
+        }),
+      );
+    } catch (err) {
+      // Dos registros simultáneos con la misma identificación: el índice único frena al segundo.
+      if (isUniqueViolation(err)) {
+        throw new ConflictException('Ya existe una persona registrada con ese tipo y número de identificación.');
+      }
+      throw err;
+    }
+
+    await this.registrationService.record({
+      channel: 'PANEL',
+      status: 'SUCCESS',
+      identification,
+      personId: person.id,
+      createdByUserId,
+    });
     // Nunca valores de datos personales en la auditoría: solo el id del registro.
-    this.auditService.annotate({ eventType: 'PERSON_CREATED', targetType: 'Person', targetId: person.id });
+    this.auditService.annotate({
+      eventType: 'PERSON_CREATED',
+      targetType: 'Person',
+      targetId: person.id,
+      details: { identificationType: identification.identificationType },
+    });
     return person;
   }
 
@@ -34,7 +80,12 @@ export class PersonsService {
     const persons = !search
       ? await this.personRepository.find({ order: { createdAt: 'DESC' } })
       : await this.personRepository.find({
-          where: [{ nationalId: Like(`%${search}%`) }, { lastName: Like(`%${search}%`) }],
+          where: [
+            { nationalId: Like(`%${search.trim()}%`) },
+            // Los números se guardan sin guiones/espacios: "1-2345" también encuentra "12345...".
+            { nationalId: Like(`%${search.replace(/[\s-]/g, '').toUpperCase()}%`) },
+            { lastName: Like(`%${search.trim()}%`) },
+          ],
           order: { createdAt: 'DESC' },
         });
     // El término buscado puede ser una cédula: se registra que hubo búsqueda, no su valor.
@@ -48,6 +99,26 @@ export class PersonsService {
       throw new NotFoundException(`No existe una persona con id ${id}.`);
     }
     return person;
+  }
+
+  /** Historial de escaneos de rostro de la persona (ingresos del kiosco y verificaciones del panel). */
+  async findScans(id: number) {
+    await this.findOne(id);
+    return this.accessLogRepository.find({
+      where: { personId: id },
+      order: { occurredAt: 'DESC' },
+      take: 100,
+    });
+  }
+
+  /** Intentos de registro de la persona o con su misma identificación. */
+  async findRegistrations(id: number) {
+    const person = await this.findOne(id);
+    const identification = {
+      identificationType: person.identificationType as 'CEDULA',
+      nationalId: person.nationalId,
+    };
+    return this.registrationService.findForPerson(id, identification);
   }
 
   async update(id: number, dto: UpdatePersonDto): Promise<BiometricPersonEntity> {

@@ -1,7 +1,12 @@
 import { Column, CreateDateColumn, Entity, PrimaryGeneratedColumn } from 'typeorm';
 
+export const SCAN_STATUSES = ['GRANTED', 'DENIED', 'AMBIGUOUS', 'MATCH', 'NO_MATCH', 'REJECTED'] as const;
+export type ScanStatus = (typeof SCAN_STATUSES)[number];
+export type ScanChannel = 'KIOSK_CHECKIN' | 'PANEL_VERIFICATION';
+
 /**
- * Bitácora de intentos de ingreso desde el kiosco. **Nunca** guarda la
+ * Historial de escaneos de rostro: ingresos del kiosco y verificaciones 1:1
+ * del panel, con su estado. **Nunca** guarda la
  * foto ni el descriptor biométrico — solo el resultado del evento.
  * `personId` es null cuando la identificación 1:N no reconoció a nadie.
  */
@@ -20,6 +25,12 @@ export class AccessLogEntity {
 
   @Column({ name: 'Granted', type: 'bit' })
   granted: boolean;
+
+  @Column({ name: 'Status', type: 'nvarchar', length: 20 })
+  status: ScanStatus;
+
+  @Column({ name: 'Channel', type: 'nvarchar', length: 20, default: 'KIOSK_CHECKIN' })
+  channel: ScanChannel;
 
   @Column({ name: 'Distance', type: 'float', nullable: true })
   distance: number | null;

@@ -15,6 +15,7 @@ import { AccessLogEntity } from './entities/access-log.entity';
 import { VerificationService, type BiometricIdentificationResult } from '../verification/verification.service';
 import { KioskRegisterDto } from './dto/kiosk-register.dto';
 import { AuditService } from '../audit/audit.service';
+import { PersonRegistrationService, isUniqueViolation } from '../persons/person-registration.service';
 
 /** Username del usuario de sistema que queda como autor de lo registrado en el kiosco (lo siembra el script 05). */
 const KIOSK_SYSTEM_USERNAME = 'kiosk';
@@ -51,6 +52,7 @@ export class KioskService {
     private readonly userRepository: Repository<UserEntity>,
     private readonly verificationService: VerificationService,
     private readonly auditService: AuditService,
+    private readonly registrationService: PersonRegistrationService,
   ) {}
 
   /** 1:N — respuesta mínima a propósito: este endpoint es público (ver README del módulo). */
@@ -73,6 +75,8 @@ export class KioskService {
     if (imageBuffers.length === 0) {
       throw new BadRequestException('Se requiere al menos una foto.');
     }
+    // Tipo + número normalizado (400 si el formato no corresponde al tipo).
+    const identification = this.registrationService.resolveIdentification(dto.identificationType, dto.nationalId);
 
     // 1) Descriptores con controles de calidad estrictos: estas fotos quedan
     //    como referencia de la persona para todos sus ingresos futuros.
@@ -87,6 +91,12 @@ export class KioskService {
         eventType: 'KIOSK_REGISTER_REJECTED',
         details: { reason: firstProblem ?? null, validPhotos: descriptors.length, totalPhotos: imageBuffers.length },
       });
+      await this.registrationService.record({
+        channel: 'KIOSK',
+        status: 'REJECTED_PHOTOS',
+        identification,
+        detail: firstProblem ?? 'Fotos insuficientes',
+      });
       throw new UnprocessableEntityException(
         `Solo ${descriptors.length} de ${imageBuffers.length} fotos sirven. ${firstProblem ?? ''} Volvé a sacar las fotos.`.trim(),
       );
@@ -96,12 +106,23 @@ export class KioskService {
     const existingByFace = await this.verificationService.identifyDescriptors('Face', descriptors);
     if (existingByFace.matched && existingByFace.person) {
       // Misma cara con OTRA cédula = alguien ya registrado intentando una segunda identidad.
-      const sameNationalId = existingByFace.person.nationalId === dto.nationalId;
+      const sameNationalId =
+        existingByFace.person.identificationType === identification.identificationType &&
+        existingByFace.person.nationalId === identification.nationalId;
+      await this.registrationService.record({
+        channel: 'KIOSK',
+        status: sameNationalId ? 'DUPLICATE_FACE' : 'IDENTITY_MISMATCH',
+        identification,
+        personId: existingByFace.person.id,
+        detail: sameNationalId
+          ? 'La persona ya estaba registrada.'
+          : 'El rostro ya está registrado con otra identificación.',
+      });
       this.auditService.annotate({
         eventType: sameNationalId ? 'KIOSK_REGISTER_DUPLICATE_FACE' : 'KIOSK_REGISTER_IDENTITY_MISMATCH',
         targetType: 'Person',
         targetId: existingByFace.person.id,
-        details: { distance: existingByFace.distance ?? null, nationalIdMatchesExisting: sameNationalId },
+        details: { distance: existingByFace.distance ?? null, sameIdentification: sameNationalId },
       });
       if (!sameNationalId) {
         // No revelar a quién pertenece esa cara a alguien que declaró otra identidad.
@@ -113,7 +134,7 @@ export class KioskService {
     }
 
     // 3) ¿La cédula ya existe?
-    const existingByNationalId = await this.personRepository.findOne({ where: { nationalId: dto.nationalId } });
+    const existingByNationalId = await this.personRepository.findOne({ where: identification });
     if (existingByNationalId) {
       // La cara no coincidió con nadie pero la cédula ya existe: posible uso de la cédula de otra persona
       // (o un falso negativo del reconocimiento de la persona legítima).
@@ -121,22 +142,40 @@ export class KioskService {
         eventType: 'KIOSK_REGISTER_NATIONALID_CONFLICT',
         targetType: 'Person',
         targetId: existingByNationalId.id,
+        details: { identificationType: identification.identificationType },
       });
-      throw new ConflictException('Ya existe una persona registrada con esa cédula.');
+      await this.registrationService.record({
+        channel: 'KIOSK',
+        status: 'DUPLICATE_ID',
+        identification,
+        personId: existingByNationalId.id,
+        detail: 'La identificación ya pertenece a una persona y el rostro no coincide.',
+      });
+      throw new ConflictException('Ya existe una persona registrada con ese tipo y número de identificación.');
     }
 
     // 4) Crear persona + enrollment + un template por foto válida.
     const kioskUserId = await this.getKioskUserId();
 
-    const person = await this.personRepository.save(
-      this.personRepository.create({
-        nationalId: dto.nationalId,
-        firstName: dto.firstName,
-        lastName: dto.lastName,
-        dateOfBirth: dto.dateOfBirth ?? null,
-        createdByUserId: kioskUserId,
-      }),
-    );
+    let person: BiometricPersonEntity;
+    try {
+      person = await this.personRepository.save(
+        this.personRepository.create({
+          identificationType: identification.identificationType,
+          nationalId: identification.nationalId,
+          firstName: dto.firstName.trim(),
+          lastName: dto.lastName.trim(),
+          dateOfBirth: dto.dateOfBirth ?? null,
+          createdByUserId: kioskUserId,
+        }),
+      );
+    } catch (err) {
+      // Dos registros simultáneos con la misma identificación: el índice único frena al segundo.
+      if (isUniqueViolation(err)) {
+        throw new ConflictException('Ya existe una persona registrada con ese tipo y número de identificación.');
+      }
+      throw err;
+    }
 
     const enrollment = await this.enrollmentRepository.save(
       this.enrollmentRepository.create({
@@ -159,11 +198,17 @@ export class KioskService {
       ),
     );
 
+    await this.registrationService.record({ channel: 'KIOSK', status: 'SUCCESS', identification, personId: person.id });
     this.auditService.annotate({
       eventType: 'KIOSK_REGISTER_SUCCESS',
       targetType: 'Person',
       targetId: person.id,
-      details: { enrollmentId: enrollment.id, templates: descriptors.length, totalPhotos: imageBuffers.length },
+      details: {
+        enrollmentId: enrollment.id,
+        templates: descriptors.length,
+        totalPhotos: imageBuffers.length,
+        identificationType: identification.identificationType,
+      },
     });
     return person;
   }
@@ -176,10 +221,17 @@ export class KioskService {
         personId: result.person?.id ?? null,
         modality: 'Face',
         granted: result.matched,
+        status: result.matched ? 'GRANTED' : result.ambiguous ? 'AMBIGUOUS' : 'DENIED',
+        channel: 'KIOSK_CHECKIN',
         distance: result.distance ?? null,
         sourceIp,
       }),
     );
+
+    if (result.matched && result.person) {
+      // "Último escaneo" del listado de personas.
+      await this.personRepository.update(result.person.id, { lastCheckInAt: accessLog.occurredAt });
+    }
 
     this.auditService.annotate({
       eventType: result.matched ? 'KIOSK_CHECKIN_GRANTED' : result.ambiguous ? 'KIOSK_CHECKIN_AMBIGUOUS' : 'KIOSK_CHECKIN_DENIED',

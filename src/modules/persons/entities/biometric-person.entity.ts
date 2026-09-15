@@ -6,7 +6,12 @@ export class BiometricPersonEntity {
   @PrimaryGeneratedColumn({ name: 'Id' })
   id: number;
 
-  @Column({ name: 'NationalId', type: 'nvarchar', length: 50, unique: true })
+  /** CEDULA | DIMEX | PASAPORTE | OTRO (ver identification.ts). Único junto con nationalId. */
+  @Column({ name: 'IdentificationType', type: 'nvarchar', length: 20, default: 'CEDULA' })
+  identificationType: string;
+
+  /** Número de identificación (de cualquier tipo), normalizado. El nombre de la columna es histórico. */
+  @Column({ name: 'NationalId', type: 'nvarchar', length: 50 })
   nationalId: string;
 
   @Column({ name: 'FirstName', type: 'nvarchar', length: 150 })
@@ -20,6 +25,10 @@ export class BiometricPersonEntity {
 
   @Column({ name: 'IsActive', type: 'bit', default: true })
   isActive: boolean;
+
+  /** Último ingreso concedido en el kiosco ("Último escaneo" del listado). */
+  @Column({ name: 'LastCheckInAt', type: 'datetime2', nullable: true })
+  lastCheckInAt: Date | null;
 
   // Referencia a security.User(Id). Sin relación TypeORM a propósito
   // (ver CLAUDE.md: no acoplar módulos de fases distintas).

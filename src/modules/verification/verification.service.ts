@@ -1,4 +1,4 @@
-import { BadRequestException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { ConfigService } from '@nestjs/config';
 import { Repository } from 'typeorm';
@@ -14,6 +14,7 @@ import {
 } from '../biometric-providers/biometric-provider.interface';
 import { AppConfig } from '../../config/configuration';
 import { AuditService } from '../audit/audit.service';
+import { AccessLogEntity, ScanStatus } from '../kiosk/entities/access-log.entity';
 
 const SUPPORTED_MODALITIES = ['Face', 'Fingerprint'] as const;
 export type BiometricModality = (typeof SUPPORTED_MODALITIES)[number];
@@ -28,6 +29,7 @@ export interface BiometricVerificationResult {
 
 export interface IdentifiedPerson {
   id: number;
+  identificationType: string;
   nationalId: string;
   firstName: string;
   lastName: string;
@@ -43,6 +45,7 @@ export interface BiometricIdentificationResult {
 
 @Injectable()
 export class VerificationService {
+  private readonly logger = new Logger(VerificationService.name);
   private readonly providersByModality: Record<BiometricModality, BiometricProvider>;
   private readonly thresholdsByModality: Record<BiometricModality, number>;
   private readonly identifyMargin: number;
@@ -52,6 +55,8 @@ export class VerificationService {
     private readonly personRepository: Repository<BiometricPersonEntity>,
     @InjectRepository(TemplateEntity)
     private readonly templateRepository: Repository<TemplateEntity>,
+    @InjectRepository(AccessLogEntity)
+    private readonly accessLogRepository: Repository<AccessLogEntity>,
     @Inject(FACE_PROVIDER)
     faceProvider: BiometricProvider,
     @Inject(FINGERPRINT_PROVIDER)
@@ -96,6 +101,7 @@ export class VerificationService {
           targetId: personId,
           details: { modality, reason: err.message },
         });
+        await this.recordPanelScan(personId, modality, 'REJECTED', null);
         throw new BadRequestException(err.message);
       }
       throw err;
@@ -106,6 +112,7 @@ export class VerificationService {
       .reduce((best, result) => (result.distance < best.distance ? result : best));
 
     const threshold = this.thresholdsByModality[modality];
+    await this.recordPanelScan(personId, modality, isMatch ? 'MATCH' : 'NO_MATCH', distance);
     this.auditService.annotate({
       eventType: isMatch ? 'VERIFICATION_MATCH' : 'VERIFICATION_NO_MATCH',
       targetType: 'Person',
@@ -113,6 +120,24 @@ export class VerificationService {
       details: { modality, distance, threshold, templatesCompared: templates.length },
     });
     return { personId, modality, isMatch, distance, threshold };
+  }
+
+  /** Verificación 1:1 del panel → historial de escaneos de la persona (biometric.AccessLog). */
+  private async recordPanelScan(personId: number, modality: BiometricModality, status: ScanStatus, distance: number | null) {
+    try {
+      await this.accessLogRepository.insert({
+        personId,
+        modality,
+        granted: status === 'MATCH',
+        status,
+        channel: 'PANEL_VERIFICATION',
+        distance,
+        sourceIp: this.auditService.currentSourceIp(),
+      });
+    } catch (err) {
+      // Sin el script 08 (columnas Status/Channel) no se rompe la verificación.
+      this.logger.error(`No se pudo guardar el escaneo en el historial: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   /**
@@ -224,6 +249,7 @@ export class VerificationService {
       distance: best.distance,
       person: {
         id: best.person.id,
+        identificationType: best.person.identificationType,
         nationalId: best.person.nationalId,
         firstName: best.person.firstName,
         lastName: best.person.lastName,

@@ -1,16 +1,24 @@
-import { IsDateString, IsNotEmpty, IsOptional, IsString } from 'class-validator';
+import { IsDateString, IsIn, IsNotEmpty, IsOptional, IsString, MaxLength } from 'class-validator';
+import { IDENTIFICATION_TYPES } from '../identification';
 
 export class CreatePersonDto {
+  @IsIn(IDENTIFICATION_TYPES, { message: 'Seleccioná un tipo de identificación válido.' })
+  identificationType: string;
+
+  /** Número de identificación del tipo elegido (se normaliza y valida en el servicio). */
   @IsString()
   @IsNotEmpty()
+  @MaxLength(60)
   nationalId: string;
 
   @IsString()
   @IsNotEmpty()
+  @MaxLength(150)
   firstName: string;
 
   @IsString()
   @IsNotEmpty()
+  @MaxLength(150)
   lastName: string;
 
   @IsOptional()
