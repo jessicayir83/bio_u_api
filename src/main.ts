@@ -1,6 +1,7 @@
 import { NestFactory } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
 import { ValidationPipe } from '@nestjs/common';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import type { HttpsOptions } from '@nestjs/common/interfaces/external/https-options.interface';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -37,16 +38,22 @@ async function bootstrap() {
   getEncryptionKeyBuffer();
 
   const httpsOptions = resolveHttpsOptions();
-  const app = await NestFactory.create(AppModule, httpsOptions ? { httpsOptions } : {});
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, httpsOptions ? { httpsOptions } : {});
 
   // CORS habilitado para que el frontend local (Vite, otro puerto) pueda llamar al API.
   app.enableCors();
 
+  const configService = app.get(ConfigService);
+
+  // Detrás del proxy de Vite / Cloudflare Tunnel todas las conexiones llegan
+  // desde 127.0.0.1: sin esto el rate limit por IP del kiosco se comparte
+  // entre todos los visitantes y AccessLog guarda siempre localhost.
+  app.set('trust proxy', configService.get<string>('trustProxy') ?? 'loopback');
+
   // Valida y transforma automáticamente los DTOs marcados con class-validator.
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
 
-  const configService = app.get(ConfigService);
-  const port = configService.get<number>('port') ?? 5001;
+  const port =configService.get<number>('port') ?? 5001;
 
   // 0.0.0.0 para aceptar conexiones de otros dispositivos de la red (teléfono/tablet).
   await app.listen(port, '0.0.0.0');

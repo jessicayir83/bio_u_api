@@ -18,6 +18,14 @@ export interface AppConfig {
     keyPath: string;
     certPath: string;
   };
+  /**
+   * Valor de Express `trust proxy`: desde qué proxies se acepta
+   * X-Forwarded-For para calcular `req.ip` (rate limiting y AccessLog).
+   * `loopback` = solo si la conexión llega de 127.0.0.1/::1 (Vite proxy +
+   * Cloudflare Tunnel en la misma PC); un cliente de la red que pegue
+   * directo al puerto no puede falsificar su IP con ese header.
+   */
+  trustProxy: string;
   database: {
     host: string;
     port: number;
@@ -50,6 +58,7 @@ export default (): AppConfig => ({
     keyPath: process.env.HTTPS_KEY_PATH ?? '../certs/dev-key.pem',
     certPath: process.env.HTTPS_CERT_PATH ?? '../certs/dev-cert.pem',
   },
+  trustProxy: process.env.TRUST_PROXY ?? 'loopback',
   database: {
     host: process.env.DB_HOST ?? 'localhost',
     port: parseInt(process.env.DB_PORT ?? '1433', 10),

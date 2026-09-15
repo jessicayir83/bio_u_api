@@ -1,4 +1,4 @@
-import { ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, Repository } from 'typeorm';
 import { JwtService } from '@nestjs/jwt';
@@ -74,10 +74,7 @@ export class AuthService {
     }
 
     if (existing.revokedAt) {
-      await this.refreshTokenRepository.update(
-        { userId: existing.userId, revokedAt: IsNull() },
-        { revokedAt: new Date() },
-      );
+      await this.revokeAllSessions(existing.userId);
       throw new UnauthorizedException('Refresh token inválido.');
     }
 
@@ -111,6 +108,42 @@ export class AuthService {
       existing.revokedAt = new Date();
       await this.refreshTokenRepository.save(existing);
     }
+  }
+
+  /**
+   * El usuario cambia su propia contraseña. Revoca todas sus sesiones (por
+   * si la contraseña vieja estaba comprometida) y devuelve tokens nuevos
+   * para que la sesión desde la que se hizo el cambio siga abierta.
+   * Los access tokens ya emitidos siguen valiendo hasta que expiran
+   * (JWT_ACCESS_EXPIRES_IN, 15 min por defecto).
+   */
+  async changePassword(userId: number, currentPassword: string, newPassword: string): Promise<AuthTokens> {
+    const user = await this.userRepository.findOne({
+      where: { id: userId },
+      relations: { userRoles: { role: true } },
+    });
+    if (!user || !user.isActive) {
+      throw new UnauthorizedException('Usuario no válido.');
+    }
+
+    if (!(await bcrypt.compare(currentPassword, user.passwordHash))) {
+      throw new BadRequestException('La contraseña actual es incorrecta.');
+    }
+    if (await bcrypt.compare(newPassword, user.passwordHash)) {
+      throw new BadRequestException('La nueva contraseña debe ser distinta de la actual.');
+    }
+
+    user.passwordHash = await bcrypt.hash(newPassword, this.authConfig.bcryptSaltRounds);
+    await this.userRepository.save(user);
+    await this.revokeAllSessions(user.id);
+
+    const roles = user.userRoles.map((userRole) => userRole.role.name);
+    return this.issueTokens(user.id, user.username, roles);
+  }
+
+  /** Revoca todos los refresh tokens vigentes del usuario (cierra todas sus sesiones). */
+  async revokeAllSessions(userId: number): Promise<void> {
+    await this.refreshTokenRepository.update({ userId, revokedAt: IsNull() }, { revokedAt: new Date() });
   }
 
   private async issueTokens(userId: number, username: string, roles: string[]): Promise<AuthTokens> {

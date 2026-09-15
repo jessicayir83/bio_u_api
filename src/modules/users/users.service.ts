@@ -6,6 +6,7 @@ import * as bcrypt from 'bcryptjs';
 import { UserEntity } from '../auth/entities/user.entity';
 import { RoleEntity } from '../auth/entities/role.entity';
 import { UserRoleEntity } from '../auth/entities/user-role.entity';
+import { AuthService } from '../auth/auth.service';
 import { AppConfig } from '../../config/configuration';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
@@ -28,6 +29,7 @@ export class UsersService {
     @InjectRepository(UserEntity) private readonly userRepository: Repository<UserEntity>,
     @InjectRepository(RoleEntity) private readonly roleRepository: Repository<RoleEntity>,
     @InjectRepository(UserRoleEntity) private readonly userRoleRepository: Repository<UserRoleEntity>,
+    private readonly authService: AuthService,
     configService: ConfigService,
   ) {
     this.bcryptSaltRounds = configService.get<AppConfig['auth']>('auth')!.bcryptSaltRounds;
@@ -123,6 +125,26 @@ export class UsersService {
     user.isActive = true;
     await this.userRepository.save(user);
     return this.findOne(id);
+  }
+
+  /**
+   * Admin le asigna una contraseña nueva a OTRO usuario (ej. la olvidó) y
+   * le cierra todas las sesiones. Para la propia se usa
+   * POST /auth/change-password, que exige la contraseña actual.
+   */
+  async resetPassword(id: number, newPassword: string, actingUserId: number): Promise<void> {
+    if (id === actingUserId) {
+      throw new BadRequestException('Para cambiar tu propia contraseña usa "Cambiar contraseña".');
+    }
+
+    const user = await this.userRepository.findOne({ where: { id } });
+    if (!user) {
+      throw new NotFoundException(`No existe un usuario con id ${id}.`);
+    }
+
+    user.passwordHash = await bcrypt.hash(newPassword, this.bcryptSaltRounds);
+    await this.userRepository.save(user);
+    await this.authService.revokeAllSessions(id);
   }
 
   private toSummary(user: UserEntity): UserSummary {
