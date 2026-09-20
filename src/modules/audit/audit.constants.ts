@@ -82,6 +82,10 @@ export const AUDIT_EVENT_TYPES = define({
   PERSON_CREATED: { category: 'PERSON', severity: 'NORMAL', outcome: 'SUCCESS', label: 'Persona creada' },
   PERSON_UPDATED: { category: 'PERSON', severity: 'NORMAL', outcome: 'SUCCESS', label: 'Persona modificada' },
   PERSON_DEACTIVATED: { category: 'PERSON', severity: 'SEV3', outcome: 'SUCCESS', label: 'Persona desactivada' },
+  // SEV2 y no SEV3: a diferencia de desactivar, esto es irreversible y borra
+  // biometría. Si alguien purga personas que no correspondía, esta fila es lo
+  // único que queda — la bitácora no tiene FK a la persona justamente por eso.
+  PERSON_PURGED: { category: 'PERSON', severity: 'SEV2', outcome: 'SUCCESS', label: 'Persona eliminada definitivamente con todos sus registros' },
   PERSON_IDENTIFIER_ADDED: { category: 'PERSON', severity: 'NORMAL', outcome: 'SUCCESS', label: 'Identificador agregado a una persona' },
   PERSON_IDENTIFIER_REMOVED: { category: 'PERSON', severity: 'NORMAL', outcome: 'SUCCESS', label: 'Identificador eliminado de una persona' },
 
@@ -93,6 +97,18 @@ export const AUDIT_EVENT_TYPES = define({
   ENROLLMENT_REVOKED: { category: 'ENROLLMENT', severity: 'SEV3', outcome: 'SUCCESS', label: 'Enrollment revocado' },
   BIOMETRIC_CAPTURED: { category: 'ENROLLMENT', severity: 'NORMAL', outcome: 'SUCCESS', label: 'Muestra biométrica capturada y guardada' },
   BIOMETRIC_CAPTURE_REJECTED: { category: 'ENROLLMENT', severity: 'SEV3', outcome: 'FAILURE', label: 'Muestra biométrica rechazada' },
+
+  // --- Galería biométrica (Nivel 2: templates adaptativos y revocación) ---
+  // SEV3 y no NORMAL: el sistema modifica solo la galería biométrica de una
+  // persona. Es legítimo, pero es exactamente lo que hay que poder revisar si
+  // alguien sospecha que una galería se corrió hacia otra cara.
+  BIOMETRIC_TEMPLATE_ADAPTED: { category: 'ENROLLMENT', severity: 'SEV3', outcome: 'SUCCESS', label: 'Template adaptativo agregado tras un ingreso reconocido' },
+  // Solo en modo `shadow`: lo que se habría agregado, sin escribir nada.
+  BIOMETRIC_TEMPLATE_ADAPTIVE_CANDIDATE: { category: 'ENROLLMENT', severity: 'NORMAL', outcome: 'INFO', label: 'Template adaptativo candidato (modo shadow, no se guardó)' },
+  BIOMETRIC_TEMPLATE_EVICTED: { category: 'ENROLLMENT', severity: 'SEV3', outcome: 'SUCCESS', label: 'Template adaptativo revocado por el tope de la galería' },
+  BIOMETRIC_TEMPLATE_REVOKED: { category: 'ENROLLMENT', severity: 'SEV3', outcome: 'SUCCESS', label: 'Template revocado manualmente' },
+  BIOMETRIC_TEMPLATE_RESTORED: { category: 'ENROLLMENT', severity: 'SEV3', outcome: 'SUCCESS', label: 'Template restaurado manualmente' },
+  BIOMETRIC_TEMPLATES_VIEWED: { category: 'ENROLLMENT', severity: 'NORMAL', outcome: 'SUCCESS', label: 'Consulta de la galería biométrica de una persona' },
 
   // --- Verificación 1:1 (panel) ---
   VERIFICATION_MATCH: { category: 'VERIFICATION', severity: 'NORMAL', outcome: 'SUCCESS', label: 'Verificación 1:1: coincide' },
@@ -113,6 +129,12 @@ export const AUDIT_EVENT_TYPES = define({
   KIOSK_REGISTER_DUPLICATE_FACE: { category: 'KIOSK', severity: 'SEV3', outcome: 'DENIED', label: 'Reconocimiento: la persona ya estaba registrada (misma cédula)' },
   KIOSK_REGISTER_IDENTITY_MISMATCH: { category: 'SECURITY', severity: 'SEV1', outcome: 'DENIED', label: 'Reconocimiento: rostro ya registrado intentando registrarse con OTRA cédula' },
   KIOSK_REGISTER_NATIONALID_CONFLICT: { category: 'SECURITY', severity: 'SEV2', outcome: 'DENIED', label: 'Reconocimiento: registro con una cédula ya existente y un rostro que no coincide' },
+  // El mismo número ya existe bajo OTRO tipo de identificación. Puede ser
+  // legítimo (la misma persona con cédula y DIMEX) o puede ser alguien usando
+  // el número de otro cambiando el tipo para esquivar la unicidad, que es por
+  // (tipo + número). Por eso se avisa y queda como alerta en vez de crearse
+  // en silencio.
+  SECURITY_IDENTIFICATION_NUMBER_REUSED: { category: 'SECURITY', severity: 'SEV2', outcome: 'DENIED', label: 'Registro con un número de identificación ya usado bajo otro tipo' },
 
   // --- Auditoría ---
   AUDIT_VIEWED: { category: 'AUDIT', severity: 'NORMAL', outcome: 'SUCCESS', label: 'Consulta de la auditoría' },

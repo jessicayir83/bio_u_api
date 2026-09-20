@@ -69,6 +69,19 @@ export class PersonsController {
     await this.personsService.deactivate(id);
   }
 
+  /**
+   * Borrado DEFINITIVO: la persona y todos sus registros (biometría,
+   * escaneos, enrollments, identificadores e intentos de registro).
+   * Irreversible, por eso es solo `Admin` — `DELETE /persons/:id` (baja
+   * lógica) sigue estando disponible para `Operator`.
+   */
+  @Delete(':id/purge')
+  @UseGuards(RolesGuard)
+  @Roles('Admin')
+  purge(@Param('id', ParseIntPipe) id: number, @CurrentUser() user: AuthenticatedUser) {
+    return this.personsService.purge(id, user.userId);
+  }
+
   @Post(':id/identifiers')
   @UseGuards(RolesGuard)
   @Roles('Admin', 'Operator')

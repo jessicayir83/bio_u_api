@@ -18,6 +18,48 @@ export type FaceDetectorKind = 'ssd' | 'tiny';
 /** `enrollment` = foto que se guarda como template (estricto); `probe` = foto para verificar/identificar (tolerante). */
 export type FaceCapturePurpose = 'enrollment' | 'probe';
 
+/**
+ * Paso del registro guiado (Nivel 2). Tres poses en el eje que más falsos
+ * negativos produce (yaw): de frente y un giro leve hacia cada lado.
+ *
+ * Por qué solo yaw y por qué leve: el descriptor de 128-d de face-api se
+ * calcula sobre un recorte alineado por landmarks; con la cara muy girada
+ * ese recorte pierde referencias y el vector deja de ser comparable contra
+ * una foto frontal. El objetivo no es cubrir el perfil, es que la galería
+ * no sean tres fotos idénticas tomadas en diez segundos.
+ */
+export type FacePoseStep = 'FRONT' | 'LEFT' | 'RIGHT';
+
+export const FACE_POSE_STEPS: readonly FacePoseStep[] = ['FRONT', 'RIGHT', 'LEFT'];
+
+export function isFacePoseStep(value: string): value is FacePoseStep {
+  return (FACE_POSE_STEPS as readonly string[]).includes(value);
+}
+
+/**
+ * Parsea el campo `steps` de un multipart ("FRONT,RIGHT,LEFT") a la lista de
+ * pasos. Lanza `Error` con un mensaje usable si algún id es desconocido o se
+ * repite; quien llama lo traduce a 400.
+ *
+ * Se valida estricto a propósito: si un id no se reconoce, la foto se
+ * guardaría con la pose equivocada o sin validar, que es peor que rechazar.
+ */
+export function parsePoseSteps(raw: string): FacePoseStep[] {
+  const steps = raw
+    .split(',')
+    .map((value) => value.trim().toUpperCase())
+    .filter((value) => value.length > 0);
+
+  const unknown = steps.find((value) => !isFacePoseStep(value));
+  if (unknown) {
+    throw new Error(`Paso de captura desconocido: ${unknown}.`);
+  }
+  if (new Set(steps).size !== steps.length) {
+    throw new Error('Hay pasos de captura repetidos.');
+  }
+  return steps as FacePoseStep[];
+}
+
 export interface FaceQualityProfile {
   minDetectionScore: number;
   /** Ancho mínimo en píxeles de la caja detectada. */
@@ -43,8 +85,69 @@ const MIN_DETECTION_SCORE: Record<FaceDetectorKind, Record<FaceCapturePurpose, n
 /** Una segunda cara cuenta como "otra persona en cuadro" si mide al menos esta fracción de la principal. */
 export const SECONDARY_FACE_MIN_RELATIVE_WIDTH = 0.5;
 
-export function getFaceQualityProfile(detector: FaceDetectorKind, purpose: FaceCapturePurpose): FaceQualityProfile {
-  return { ...BASE_PROFILES[purpose], minDetectionScore: MIN_DETECTION_SCORE[detector][purpose] };
+/**
+ * Banda de giro que exige cada paso lateral del registro guiado, medida
+ * sobre |yawSigned|.
+ *
+ * - El piso (0.10) es lo que obliga a que el paso aporte de verdad una pose
+ *   distinta: por debajo, es una tercera foto frontal y la galería no gana
+ *   nada.
+ * - El techo (0.22) es donde el recorte alineado empieza a degradarse y el
+ *   descriptor deja de comparar bien contra una foto frontal.
+ *
+ * Valores iniciales, a confirmar con `npm run calibrate:face` antes/después
+ * de reenrolar: si sube el FAR, el sospechoso es el techo.
+ */
+const GUIDED_STEP_YAW = { min: 0.1, max: 0.22 } as const;
+
+/**
+ * Signo de `yawSigned` cuando la persona gira la cabeza hacia SU derecha.
+ *
+ * Al girar hacia su derecha, ese lado de la cara se aleja de la cámara; en
+ * la imagen sin espejar ese lado es el izquierdo, así que la nariz se
+ * desplaza hacia el borde izquierdo de la mandíbula → yawRatio < 0.5 →
+ * negativo. Es UNA constante a propósito: si la prueba con foto real
+ * demuestra lo contrario, se invierte acá y no en cinco lugares.
+ */
+const YAW_SIGN_PERSON_RIGHT = -1;
+
+export function getFaceQualityProfile(
+  detector: FaceDetectorKind,
+  purpose: FaceCapturePurpose,
+  poseStep?: FacePoseStep,
+): FaceQualityProfile {
+  const profile = { ...BASE_PROFILES[purpose], minDetectionScore: MIN_DETECTION_SCORE[detector][purpose] };
+  if (poseStep && poseStep !== 'FRONT') {
+    // Los pasos laterales necesitan permiso para girar; todo lo demás
+    // (tamaño, confianza, inclinación, nitidez) sigue igual de estricto.
+    profile.maxYawOffset = GUIDED_STEP_YAW.max;
+  }
+  return profile;
+}
+
+/**
+ * Valida que la captura corresponda al paso de pose que se pidió. Se corre
+ * DESPUÉS de `findFaceQualityProblem` (primero la foto tiene que ser usable;
+ * recién después tiene sentido discutir hacia dónde mira).
+ */
+export function findPoseStepProblem(metrics: FaceQualityMetrics, step: FacePoseStep): string | null {
+  const { yawSigned, yawOffset } = metrics.pose;
+
+  if (step === 'FRONT') {
+    // El techo frontal ya lo aplicó el perfil; acá no hay nada extra que pedir.
+    return null;
+  }
+
+  const expectedSign = step === 'RIGHT' ? YAW_SIGN_PERSON_RIGHT : -YAW_SIGN_PERSON_RIGHT;
+  const towardsLabel = step === 'RIGHT' ? 'tu derecha' : 'tu izquierda';
+
+  if (Math.sign(yawSigned) !== expectedSign || yawOffset < GUIDED_STEP_YAW.min) {
+    return `Girá un poco la cabeza hacia ${towardsLabel}, sin dejar de mirar a la cámara.`;
+  }
+  if (yawOffset > GUIDED_STEP_YAW.max) {
+    return 'Te giraste de más. Volvé un poco hacia el centro.';
+  }
+  return null;
 }
 
 export interface Point {
@@ -53,7 +156,18 @@ export interface Point {
 }
 
 export interface FacePose {
+  /** Magnitud del giro, sin lado (0 = de frente, 0.5 = perfil). Es lo que miran los perfiles normales. */
   yawOffset: number;
+  /**
+   * Giro con signo, para distinguir hacia qué lado está girada la cara en la
+   * imagen **sin espejar** (la que recibe el servidor, no la que ve la
+   * persona en pantalla). Solo lo usa el registro guiado.
+   *
+   * El signo se fija en SIGNED_YAW_TOWARDS: qué lado de la persona
+   * corresponde a un valor positivo se determinó con fotos de prueba, no por
+   * deducción — ver `documentation`.
+   */
+  yawSigned: number;
   rollDegrees: number;
 }
 
@@ -85,7 +199,8 @@ export function estimateFacePose(landmarks: Point[]): FacePose {
   const rightEye = centroid(landmarks, 42, 47);
   const rollDegrees = (Math.atan2(rightEye.y - leftEye.y, rightEye.x - leftEye.x) * 180) / Math.PI;
 
-  return { yawOffset: Math.abs(yawRatio - 0.5), rollDegrees: Math.abs(rollDegrees) };
+  const yawSigned = yawRatio - 0.5;
+  return { yawOffset: Math.abs(yawSigned), yawSigned, rollDegrees: Math.abs(rollDegrees) };
 }
 
 /** Varianza del Laplaciano (kernel 4-vecinos) sobre una imagen en escala de grises: baja = borrosa. */

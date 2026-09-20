@@ -1,7 +1,8 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Not, Repository } from 'typeorm';
 import { PersonRegistrationEntity, RegistrationChannel, RegistrationStatus } from './entities/person-registration.entity';
+import { BiometricPersonEntity } from './entities/biometric-person.entity';
 import {
   IDENTIFICATION_TYPES,
   IdentificationType,
@@ -43,6 +44,8 @@ export class PersonRegistrationService {
   constructor(
     @InjectRepository(PersonRegistrationEntity)
     private readonly registrationRepository: Repository<PersonRegistrationEntity>,
+    @InjectRepository(BiometricPersonEntity)
+    private readonly personRepository: Repository<BiometricPersonEntity>,
     private readonly auditService: AuditService,
   ) {}
 
@@ -58,6 +61,50 @@ export class PersonRegistrationService {
       throw new BadRequestException(problem);
     }
     return { identificationType, nationalId };
+  }
+
+  /**
+   * Busca una persona con el MISMO número pero OTRO tipo de identificación.
+   *
+   * Desde el script 08 la unicidad es por (tipo + número), así que "604690940"
+   * como CEDULA y como OTRO conviven sin chocar. A veces es legítimo (la misma
+   * persona con cédula y DIMEX), pero también es la forma de esquivar la
+   * unicidad usando el número de otro con un tipo distinto — y en la práctica
+   * es la causa más común de terminar con dos fichas de la misma persona.
+   *
+   * Por eso no se decide acá qué hacer: se devuelve el hallazgo y cada
+   * superficie resuelve (el panel avisa al operador, el kiosco no revela nada).
+   */
+  async findSameNumberOtherType(identification: ResolvedIdentification): Promise<BiometricPersonEntity | null> {
+    return this.personRepository.findOne({
+      where: {
+        nationalId: identification.nationalId,
+        identificationType: Not(identification.identificationType),
+      },
+    });
+  }
+
+  /**
+   * Deja la alerta SEV2 del número reusado. Solo ids y el TIPO de
+   * identificación: nunca el número ni el nombre de nadie.
+   */
+  annotateNumberReused(params: {
+    identification: ResolvedIdentification;
+    existingPersonId: number;
+    existingType: string;
+    channel: RegistrationChannel;
+  }): void {
+    this.auditService.annotate({
+      eventType: 'SECURITY_IDENTIFICATION_NUMBER_REUSED',
+      targetType: 'Person',
+      targetId: params.existingPersonId,
+      details: {
+        channel: params.channel,
+        tipoIntentado: params.identification.identificationType,
+        tipoExistente: params.existingType,
+        existingPersonId: params.existingPersonId,
+      },
+    });
   }
 
   /** Registra el intento. Nunca rompe la operación si falla (ej. script 08 sin ejecutar). */

@@ -119,6 +119,21 @@ export class AuditService implements BeforeApplicationShutdown {
     return auditContextStorage.getStore()?.sourceIp ?? null;
   }
 
+  /**
+   * Correlation id del request en curso, para los eventos que se escriben
+   * con `record()` en vez de `annotate()` y aun así tienen que quedar
+   * enlazados al request en el panel (que agrupa por correlation id).
+   *
+   * Cuándo hace falta: `annotate()` escribe UNA fila por request, así que un
+   * segundo `annotate()` pisa el `eventType` del primero. Una operación que
+   * necesite su propia fila además de la del request (ej. un template
+   * adaptativo agregado durante un ingreso, que no puede borrar el
+   * `KIOSK_CHECKIN_GRANTED`) usa `record()` + este id.
+   */
+  currentCorrelationId(): string | null {
+    return auditContextStorage.getStore()?.correlationId ?? null;
+  }
+
   /** Lo llama el filtro global de excepciones: guarda el error para el evento del request. */
   captureException(exception: unknown): void {
     const context = auditContextStorage.getStore();

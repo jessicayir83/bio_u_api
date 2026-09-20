@@ -1,4 +1,4 @@
-import { IsDateString, IsIn, IsNotEmpty, IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsBoolean, IsDateString, IsIn, IsNotEmpty, IsOptional, IsString, MaxLength } from 'class-validator';
 import { IDENTIFICATION_TYPES } from '../identification';
 
 export class CreatePersonDto {
@@ -24,4 +24,13 @@ export class CreatePersonDto {
   @IsOptional()
   @IsDateString()
   dateOfBirth?: string;
+
+  /**
+   * El operador ya vio el aviso de "ese número existe con otro tipo" y
+   * confirmó que quiere registrarla igual. Solo sirve para ese caso: nunca
+   * permite duplicar el mismo tipo + número, que sigue siendo un 409 duro.
+   */
+  @IsOptional()
+  @IsBoolean()
+  allowDuplicateNumber?: boolean;
 }

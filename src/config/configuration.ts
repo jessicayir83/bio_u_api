@@ -67,6 +67,44 @@ export interface AppConfig {
     faceModelsPath: string;
     faceMatchThreshold: number;
     faceIdentifyMargin: number;
+    /**
+     * Templates adaptativos (Nivel 2): el sistema agrega vectores por su
+     * cuenta a partir de ingresos reconocidos con holgura, para que la
+     * galería acompañe los cambios de aspecto, luz y cámara.
+     *
+     * Todos los topes son deliberadamente estrictos: una galería que se
+     * mueve sola es también la forma clásica de envenenar un sistema
+     * biométrico, así que cada criterio es una barrera aparte.
+     */
+    adaptive: {
+      /**
+       * `off` no evalúa nada. `shadow` evalúa y registra qué HABRÍA hecho,
+       * sin escribir templates — sirve para mirar una o dos semanas de datos
+       * reales antes de dejarlo tocar biometría en producción. `on` escribe.
+       */
+      mode: 'off' | 'shadow' | 'on';
+      /** Piso: por debajo es prácticamente la misma foto ya enrolada y no aporta nada nuevo. */
+      minDistance: number;
+      /** Techo: muy por debajo del umbral de match, para aprender solo de reconocimientos holgados. */
+      maxDistance: number;
+      /** Margen mínimo contra la segunda persona; mucho más duro que `faceIdentifyMargin`. */
+      minMargin: number;
+      /**
+       * Ancla: distancia máxima contra los templates del registro ORIGINAL.
+       * Es la defensa central contra la deriva — sin ella, cada template
+       * adaptativo engendra al siguiente y la galería se aleja de a poco de
+       * la persona real hasta quedar más cerca de un impostor.
+       */
+      anchorMaxDistance: number;
+      /** Frames del mismo intento que deben coincidir por separado: una foto "de suerte" no alcanza. */
+      minFrames: number;
+      /** Máximo de templates adaptativos por persona por día (acota la velocidad de la deriva). */
+      maxPerDay: number;
+      /** Tope total de templates adaptativos activos por persona. */
+      maxPerPerson: number;
+      /** Mínimo de templates del registro original que debe tener la persona para poder adaptar. */
+      minEnrollmentTemplates: number;
+    };
   };
 }
 
@@ -109,8 +147,26 @@ export default (): AppConfig => ({
     faceModelsPath: process.env.FACE_MODELS_PATH ?? 'models',
     faceMatchThreshold: parseFloat(process.env.FACE_MATCH_THRESHOLD ?? '0.6'),
     faceIdentifyMargin: parseFloat(process.env.FACE_IDENTIFY_MARGIN ?? '0.05'),
+    adaptive: {
+      // Arranca en `shadow` a propósito: el proyecto va a producción, y
+      // conviene mirar los números reales antes de que esto escriba
+      // biometría solo. Pasar a `on` es un cambio de .env.
+      mode: parseAdaptiveMode(process.env.FACE_ADAPTIVE_MODE),
+      minDistance: parseFloat(process.env.FACE_ADAPTIVE_MIN_DISTANCE ?? '0.25'),
+      maxDistance: parseFloat(process.env.FACE_ADAPTIVE_MAX_DISTANCE ?? '0.40'),
+      minMargin: parseFloat(process.env.FACE_ADAPTIVE_MIN_MARGIN ?? '0.15'),
+      anchorMaxDistance: parseFloat(process.env.FACE_ADAPTIVE_ANCHOR_MAX_DISTANCE ?? '0.45'),
+      minFrames: parseInt(process.env.FACE_ADAPTIVE_MIN_FRAMES ?? '2', 10),
+      maxPerDay: parseInt(process.env.FACE_ADAPTIVE_MAX_PER_DAY ?? '1', 10),
+      maxPerPerson: parseInt(process.env.FACE_ADAPTIVE_MAX_PER_PERSON ?? '8', 10),
+      minEnrollmentTemplates: parseInt(process.env.FACE_ADAPTIVE_MIN_ENROLLMENT_TEMPLATES ?? '2', 10),
+    },
   },
 });
+
+function parseAdaptiveMode(value: string | undefined): 'off' | 'shadow' | 'on' {
+  return value === 'on' || value === 'off' ? value : 'shadow';
+}
 
 /**
  * Excepción puntual a "todo pasa por ConfigService": los column

@@ -21,6 +21,7 @@ import {
   FaceDetectorKind,
   FaceQualityMetrics,
   findFaceQualityProblem,
+  findPoseStepProblem,
   getFaceQualityProfile,
   laplacianVariance,
   SECONDARY_FACE_MIN_RELATIVE_WIDTH,
@@ -84,7 +85,7 @@ export class FaceApiProvider implements BiometricProvider, OnModuleInit {
       throw new Error('FaceApiProvider: los modelos todavía no terminan de cargar.');
     }
     const purpose = options.purpose ?? 'probe';
-    const profile = getFaceQualityProfile(this.detector, purpose);
+    const profile = getFaceQualityProfile(this.detector, purpose, options.poseStep);
 
     const image = await this.readImage(imageBuffer);
     const tensor = this.imageToTensor(image);
@@ -110,10 +111,13 @@ export class FaceApiProvider implements BiometricProvider, OnModuleInit {
             face.detection.box.width >= mainWidth * SECONDARY_FACE_MIN_RELATIVE_WIDTH,
         ).length,
       };
-      const problem = findFaceQualityProblem(metrics, profile);
+      // Primero: ¿la foto sirve? Recién después: ¿es la pose que se pidió?
+      const problem =
+        findFaceQualityProblem(metrics, profile) ?? (options.poseStep ? findPoseStepProblem(metrics, options.poseStep) : null);
       this.logger.debug(
-        `Calidad (${purpose}): score=${metrics.detectionScore.toFixed(3)} ancho=${Math.round(metrics.faceWidthPx)}px ` +
-          `yaw=${metrics.pose.yawOffset.toFixed(3)} roll=${metrics.pose.rollDegrees.toFixed(1)}° ` +
+        `Calidad (${purpose}${options.poseStep ? `/${options.poseStep}` : ''}): ` +
+          `score=${metrics.detectionScore.toFixed(3)} ancho=${Math.round(metrics.faceWidthPx)}px ` +
+          `yaw=${metrics.pose.yawSigned.toFixed(3)} roll=${metrics.pose.rollDegrees.toFixed(1)}° ` +
           `nitidez=${metrics.sharpness.toFixed(1)} otros=${metrics.otherFaces} → ${problem ?? 'OK'}`,
       );
       if (problem) {
@@ -125,7 +129,21 @@ export class FaceApiProvider implements BiometricProvider, OnModuleInit {
       const [faceTensor] = await faceapi.extractFaceTensors(tensor, [main.alignedRect]);
       try {
         const descriptor: Float32Array = await faceapi.nets.faceRecognitionNet.computeFaceDescriptor(faceTensor);
-        return { vector: Array.from(descriptor) };
+        return {
+          vector: Array.from(descriptor),
+          quality: {
+            detectionScore: metrics.detectionScore,
+            sizePx: metrics.faceWidthPx,
+            sharpness: metrics.sharpness,
+            poseOffset: metrics.pose.yawOffset,
+            poseOffsetSigned: metrics.pose.yawSigned,
+            // Se evalúa siempre, incluso en un probe: es lo que le permite a
+            // la adaptación de templates exigir calidad de registro sin pagar
+            // una segunda detección (~1s).
+            meetsEnrollmentProfile:
+              findFaceQualityProblem(metrics, getFaceQualityProfile(this.detector, 'enrollment')) === null,
+          },
+        };
       } finally {
         tf.dispose(faceTensor);
       }

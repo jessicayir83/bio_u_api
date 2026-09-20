@@ -28,4 +28,15 @@ export class KioskRegisterDto {
   @IsOptional()
   @IsDateString()
   dateOfBirth?: string;
+
+  /**
+   * Pasos de pose del registro guiado, en el mismo orden que las fotos del
+   * campo `images` (ej. "FRONT,RIGHT,LEFT"). Opcional: sin él, el registro se
+   * comporta como antes del Nivel 2. Los ids se validan en el controlador
+   * contra el catálogo de `face-quality.ts`.
+   */
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  steps?: string;
 }

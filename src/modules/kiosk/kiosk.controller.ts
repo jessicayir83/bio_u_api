@@ -3,6 +3,7 @@ import { FileFieldsInterceptor, FilesInterceptor } from '@nestjs/platform-expres
 import { Throttle } from '@nestjs/throttler';
 import { KioskService } from './kiosk.service';
 import { KioskRegisterDto } from './dto/kiosk-register.dto';
+import { type FacePoseStep, parsePoseSteps } from '../biometric-providers/face/face-quality';
 
 const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024;
 const MAX_REGISTER_PHOTOS = 3;
@@ -57,9 +58,23 @@ export class KioskController {
     if (images.some((image) => image.size > MAX_IMAGE_SIZE_BYTES)) {
       throw new BadRequestException('Alguna de las fotos supera el tamaño máximo permitido (5MB).');
     }
+
+    // `steps` es opcional: sin él, el registro se comporta como antes del
+    // Nivel 2 (todas las fotos frontales, sin validación de pose). Así no se
+    // rompe Postman ni ningún cliente viejo.
+    let poseSteps: FacePoseStep[] | undefined;
+    if (dto.steps) {
+      try {
+        poseSteps = parsePoseSteps(dto.steps);
+      } catch (err) {
+        throw new BadRequestException(err instanceof Error ? err.message : 'Pasos de captura inválidos.');
+      }
+    }
+
     return this.kioskService.register(
       dto,
       images.map((image) => image.buffer),
+      poseSteps,
     );
   }
 

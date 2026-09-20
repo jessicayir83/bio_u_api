@@ -1,9 +1,9 @@
 import { BadRequestException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { ConfigService } from '@nestjs/config';
-import { Repository } from 'typeorm';
+import { IsNull, Repository } from 'typeorm';
 import { BiometricPersonEntity } from '../persons/entities/biometric-person.entity';
-import { TemplateEntity } from '../enrollment/entities/template.entity';
+import { TemplateEntity, type TemplateSource } from '../enrollment/entities/template.entity';
 import {
   BiometricDescriptor,
   BiometricDetectionError,
@@ -12,6 +12,7 @@ import {
   FINGERPRINT_PROVIDER,
   InvalidBiometricInputError,
 } from '../biometric-providers/biometric-provider.interface';
+import type { FacePoseStep } from '../biometric-providers/face/face-quality';
 import { AppConfig } from '../../config/configuration';
 import { AuditService } from '../audit/audit.service';
 import { AccessLogEntity, ScanStatus } from '../kiosk/entities/access-log.entity';
@@ -41,6 +42,33 @@ export interface BiometricIdentificationResult {
   distance?: number;
   /** true cuando el mejor match no se distingue lo suficiente del segundo (ver FACE_IDENTIFY_MARGIN). */
   ambiguous?: boolean;
+  /**
+   * Detalle interno del match. **Nunca sale al cliente**: el kiosco arma su
+   * respuesta pública con `toPublicIdentifyResponse`. Lo consume la
+   * adaptación de templates, que necesita saber con cuánta holgura ganó el
+   * match antes de aprender de él.
+   */
+  detail?: BiometricIdentificationDetail;
+}
+
+/** Vector descifrado de un template, con lo mínimo para saber de dónde salió. */
+interface TemplateVector {
+  templateId: number;
+  source: TemplateSource;
+  vector: number[];
+}
+
+export interface BiometricIdentificationDetail {
+  /** Distancia de la segunda persona; `null` si no hay otra en la base. */
+  runnerUpDistance: number | null;
+  /** Template que quedó más cerca (para contabilizar su uso). */
+  bestTemplateId: number | null;
+  /** Índice del probe que ganó, dentro de los descriptores recibidos. */
+  bestProbeIndex: number;
+  /** Distancia de cada probe a la persona ganadora (para exigir varios frames coincidentes). */
+  perProbeDistances: number[];
+  /** Menor distancia contra templates del registro ORIGINAL: el ancla anti-deriva. */
+  anchorDistance: number | null;
 }
 
 @Injectable()
@@ -85,7 +113,8 @@ export class VerificationService {
     // Contra TODOS los templates de la persona, quedándose con el más
     // cercano: una persona registrada con varias fotos (ángulos/gestos
     // distintos) se reconoce mejor que comparando solo contra la última.
-    const templates = await this.templateRepository.find({ where: { personId, modality } });
+    // Sin los revocados, igual que la identificación 1:N.
+    const templates = await this.templateRepository.find({ where: { personId, modality, revokedAt: IsNull() } });
     if (templates.length === 0) {
       throw new NotFoundException(`La persona no tiene un template ${modality} registrado.`);
     }
@@ -149,24 +178,30 @@ export class VerificationService {
     modality: BiometricModality,
     sampleBuffers: Buffer[],
     purpose: 'enrollment' | 'probe',
-  ): Promise<{ descriptors: BiometricDescriptor[]; firstProblem?: string }> {
+    poseSteps?: FacePoseStep[],
+  ): Promise<{ descriptors: BiometricDescriptor[]; validPoseSteps: (FacePoseStep | null)[]; firstProblem?: string }> {
     const provider = this.providersByModality[modality];
     const descriptors: BiometricDescriptor[] = [];
+    // Alineado 1 a 1 con `descriptors`: qué paso de pose sobrevivió, para
+    // poder guardarlo con su template (las descartadas rompen el índice).
+    const validPoseSteps: (FacePoseStep | null)[] = [];
     let firstProblem: string | undefined;
 
-    for (const buffer of sampleBuffers) {
+    for (const [index, buffer] of sampleBuffers.entries()) {
+      const poseStep = poseSteps?.[index];
       try {
-        descriptors.push(await provider.extractDescriptor(buffer, { purpose }));
+        descriptors.push(await provider.extractDescriptor(buffer, { purpose, poseStep }));
+        validPoseSteps.push(poseStep ?? null);
       } catch (err) {
         if (err instanceof BiometricDetectionError || err instanceof InvalidBiometricInputError) {
-          firstProblem ??= err.message;
+          firstProblem ??= poseStep ? `${err.message} (${poseStep})` : err.message;
           continue;
         }
         throw err;
       }
     }
 
-    return { descriptors, firstProblem };
+    return { descriptors, validPoseSteps, firstProblem };
   }
 
   /**
@@ -207,25 +242,39 @@ export class VerificationService {
     }
 
     const templates = await this.templateRepository.find({
-      where: { modality },
+      // Los revocados (por un Admin o por el tope de adaptativos) siguen en la
+      // tabla pero NO participan del reconocimiento. Ver también `verify`.
+      where: { modality, revokedAt: IsNull() },
       relations: { person: true },
     });
 
-    const vectorsByPerson = new Map<number, { person: BiometricPersonEntity; vectors: number[][] }>();
+    const vectorsByPerson = new Map<number, { person: BiometricPersonEntity; entries: TemplateVector[] }>();
     for (const template of templates) {
       if (!template.person?.isActive) continue;
-      const entry = vectorsByPerson.get(template.person.id) ?? { person: template.person, vectors: [] };
-      entry.vectors.push(JSON.parse(template.vectorJson));
+      const entry = vectorsByPerson.get(template.person.id) ?? { person: template.person, entries: [] };
+      entry.entries.push({
+        templateId: template.id,
+        source: template.source,
+        vector: JSON.parse(template.vectorJson) as number[],
+      });
       vectorsByPerson.set(template.person.id, entry);
     }
 
     const candidates = [...vectorsByPerson.values()]
-      .map(({ person, vectors }) => {
-        const closestPerProbe = probes.map((probe) =>
-          Math.min(...vectors.map((vector) => provider.compare({ vector }, probe).distance)),
+      .map(({ person, entries }) => {
+        // Para cada probe, su template más cercano; después el promedio entre
+        // probes (un frame malo pesa menos que en una sola foto).
+        const perProbe = probes.map((probe) =>
+          entries.reduce(
+            (closest, entry) => {
+              const distance = provider.compare({ vector: entry.vector }, probe).distance;
+              return distance < closest.distance ? { distance, templateId: entry.templateId } : closest;
+            },
+            { distance: Number.POSITIVE_INFINITY, templateId: null as number | null },
+          ),
         );
-        const distance = closestPerProbe.reduce((sum, value) => sum + value, 0) / closestPerProbe.length;
-        return { person, distance };
+        const distance = perProbe.reduce((sum, value) => sum + value.distance, 0) / perProbe.length;
+        return { person, entries, perProbe, distance };
       })
       .sort((a, b) => a.distance - b.distance);
 
@@ -244,6 +293,20 @@ export class VerificationService {
       return { matched: false, ambiguous: true };
     }
 
+    let bestProbeIndex = 0;
+    best.perProbe.forEach((value, index) => {
+      if (value.distance < best.perProbe[bestProbeIndex].distance) bestProbeIndex = index;
+    });
+
+    // Ancla anti-deriva: distancia contra los templates del registro original,
+    // que son los únicos que nunca se generaron solos.
+    const anchorVectors = best.entries.filter((entry) => entry.source === 'ENROLLMENT');
+    const anchorDistance = anchorVectors.length
+      ? Math.min(
+          ...anchorVectors.map((entry) => provider.compare({ vector: entry.vector }, probes[bestProbeIndex]).distance),
+        )
+      : null;
+
     return {
       matched: true,
       distance: best.distance,
@@ -253,6 +316,13 @@ export class VerificationService {
         nationalId: best.person.nationalId,
         firstName: best.person.firstName,
         lastName: best.person.lastName,
+      },
+      detail: {
+        runnerUpDistance: runnerUp?.distance ?? null,
+        bestTemplateId: best.perProbe[bestProbeIndex].templateId,
+        bestProbeIndex,
+        perProbeDistances: best.perProbe.map((value) => value.distance),
+        anchorDistance,
       },
     };
   }
