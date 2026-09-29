@@ -17,6 +17,7 @@ import { VerificationService, type BiometricIdentificationResult } from '../veri
 import { KioskRegisterDto } from './dto/kiosk-register.dto';
 import { AuditService } from '../audit/audit.service';
 import { PersonRegistrationService, isUniqueViolation } from '../persons/person-registration.service';
+import { PersonConsentService, isMinor } from '../persons/person-consent.service';
 import { templateProvenanceFields } from '../enrollment/template-fields';
 import { AdaptiveTemplateService } from '../enrollment/adaptive-template.service';
 import type { BiometricDescriptor } from '../biometric-providers/biometric-provider.interface';
@@ -63,6 +64,7 @@ export class KioskService {
     private readonly verificationService: VerificationService,
     private readonly auditService: AuditService,
     private readonly registrationService: PersonRegistrationService,
+    private readonly consentService: PersonConsentService,
     private readonly adaptiveTemplateService: AdaptiveTemplateService,
     configService: ConfigService<AppConfig, true>,
   ) {
@@ -95,6 +97,16 @@ export class KioskService {
     }
     // Tipo + número normalizado (400 si el formato no corresponde al tipo).
     const identification = this.registrationService.resolveIdentification(dto.identificationType, dto.nationalId);
+
+    // Un menor de edad no consiente por sí mismo: el registro lo hace un operador
+    // con la autorización de su padre, madre o tutor. Si no se indica fecha de
+    // nacimiento no hay forma de saberlo desde acá (límite conocido).
+    if (isMinor(dto.dateOfBirth)) {
+      this.auditService.annotate({ eventType: 'KIOSK_REGISTER_REJECTED', details: { reason: 'MINOR_NEEDS_GUARDIAN' } });
+      throw new BadRequestException(
+        'Para registrarte necesitamos la autorización de tu padre, madre o tutor. Acercate a un operador para continuar.',
+      );
+    }
 
     // 1) Descriptores con controles de calidad estrictos: estas fotos quedan
     //    como referencia de la persona para todos sus ingresos futuros. Si el
@@ -220,6 +232,13 @@ export class KioskService {
       }
       throw err;
     }
+
+    // La persona aceptó por sí misma en la pantalla de consentimiento del kiosco.
+    await this.consentService.recordBiometricConsent({
+      personId: person.id,
+      policyVersion: dto.policyVersion,
+      channel: 'KIOSK',
+    });
 
     const enrollment = await this.enrollmentRepository.save(
       this.enrollmentRepository.create({

@@ -1,7 +1,8 @@
 import { IsBoolean, IsDateString, IsIn, IsNotEmpty, IsOptional, IsString, MaxLength } from 'class-validator';
 import { IDENTIFICATION_TYPES } from '../identification';
+import { ConsentFields } from './consent-fields';
 
-export class CreatePersonDto {
+export class CreatePersonDto extends ConsentFields {
   @IsIn(IDENTIFICATION_TYPES, { message: 'Seleccioná un tipo de identificación válido.' })
   identificationType: string;
 

@@ -86,6 +86,7 @@ export const AUDIT_EVENT_TYPES = define({
   // biometría. Si alguien purga personas que no correspondía, esta fila es lo
   // único que queda — la bitácora no tiene FK a la persona justamente por eso.
   PERSON_PURGED: { category: 'PERSON', severity: 'SEV2', outcome: 'SUCCESS', label: 'Persona eliminada definitivamente con todos sus registros' },
+  CONSENT_GRANTED: { category: 'PERSON', severity: 'NORMAL', outcome: 'SUCCESS', label: 'Consentimiento de tratamiento biométrico registrado' },
   PERSON_IDENTIFIER_ADDED: { category: 'PERSON', severity: 'NORMAL', outcome: 'SUCCESS', label: 'Identificador agregado a una persona' },
   PERSON_IDENTIFIER_REMOVED: { category: 'PERSON', severity: 'NORMAL', outcome: 'SUCCESS', label: 'Identificador eliminado de una persona' },
 

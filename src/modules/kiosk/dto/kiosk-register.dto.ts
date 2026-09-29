@@ -1,11 +1,12 @@
 import { IsDateString, IsIn, IsNotEmpty, IsOptional, IsString, MaxLength } from 'class-validator';
 import { IDENTIFICATION_TYPES } from '../../persons/identification';
+import { ConsentFields } from '../../persons/dto/consent-fields';
 
 /**
  * Datos que la persona llena en el kiosco al registrarse. Las fotos van
  * aparte, como archivos del multipart (campo `images`).
  */
-export class KioskRegisterDto {
+export class KioskRegisterDto extends ConsentFields {
   @IsIn(IDENTIFICATION_TYPES, { message: 'Seleccioná un tipo de identificación válido.' })
   identificationType: string;
 

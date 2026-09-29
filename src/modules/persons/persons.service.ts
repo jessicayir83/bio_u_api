@@ -4,6 +4,8 @@ import { DataSource, Like, Repository } from 'typeorm';
 import { BiometricPersonEntity } from './entities/biometric-person.entity';
 import { PersonIdentifierEntity } from './entities/person-identifier.entity';
 import { PersonRegistrationEntity } from './entities/person-registration.entity';
+import { PersonConsentEntity } from './entities/person-consent.entity';
+import { PersonConsentService } from './person-consent.service';
 // Solo las CLASES de entidad, para poder borrarlas en la transacción del
 // purgado. No se importa `EnrollmentModule` (importaría este módulo de vuelta
 // y haría un ciclo de DI): una clase de entidad no crea dependencia de DI.
@@ -30,6 +32,7 @@ export interface PersonPurgeResult {
   enrollments: number;
   identifiers: number;
   registrations: number;
+  consents: number;
 }
 
 @Injectable()
@@ -41,6 +44,7 @@ export class PersonsService {
     private readonly identifierRepository: Repository<PersonIdentifierEntity>,
     private readonly auditService: AuditService,
     private readonly registrationService: PersonRegistrationService,
+    private readonly consentService: PersonConsentService,
     @InjectRepository(AccessLogEntity)
     private readonly accessLogRepository: Repository<AccessLogEntity>,
     @InjectDataSource()
@@ -115,6 +119,14 @@ export class PersonsService {
       throw err;
     }
 
+    // El operador confirmó en pantalla que la persona dio su consentimiento informado.
+    await this.consentService.recordBiometricConsent({
+      personId: person.id,
+      policyVersion: dto.policyVersion,
+      channel: 'PANEL',
+      recordedByUserId: createdByUserId,
+    });
+
     await this.registrationService.record({
       channel: 'PANEL',
       status: 'SUCCESS',
@@ -180,6 +192,7 @@ export class PersonsService {
       const enrollments = await manager.delete(EnrollmentEntity, { personId: id });
       const identifiers = await manager.delete(PersonIdentifierEntity, { personId: id });
       const registrations = await manager.delete(PersonRegistrationEntity, { personId: id });
+      const consents = await manager.delete(PersonConsentEntity, { personId: id });
       await manager.delete(BiometricPersonEntity, { id });
 
       return {
@@ -188,6 +201,7 @@ export class PersonsService {
         enrollments: enrollments.affected ?? 0,
         identifiers: identifiers.affected ?? 0,
         registrations: registrations.affected ?? 0,
+        consents: consents.affected ?? 0,
       };
     });
 

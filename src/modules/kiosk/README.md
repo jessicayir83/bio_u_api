@@ -24,7 +24,10 @@ Mitigaciones aplicadas:
   Responde `{ matched, person?, ambiguous? }`. Lo usa "Registrarme" para
   no duplicar personas.
 - `POST /kiosk/register` (multipart `images` ×1-3 + `nationalId`,
-  `firstName`, `lastName`, `dateOfBirth?`) — 409 si la cara o la cédula
+  `firstName`, `lastName`, `dateOfBirth?`, **`consentAccepted=true`** y
+  **`policyVersion`**) — 400 sin consentimiento o si la fecha de nacimiento
+  es de un menor de 18 (se deriva a un operador); el consentimiento se
+  guarda en `[identity].PersonConsent`. 409 si la cara o la cédula
   ya existen; 400 si ninguna foto tiene rostro detectable. Crea persona +
   enrollment `Face` `Completed` + un `Template` por foto válida (varios
   templates mejoran el match posterior).
