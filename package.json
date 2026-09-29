@@ -1,7 +1,7 @@
 {
   "name": "biometric-platform-api",
   "version": "0.1.0",
-  "description": "Biometric Platform API - Fase 1: Foundation Local",
+  "description": "Bio U API - Fase 1: Foundation Local",
   "private": true,
   "scripts": {
     "build": "nest build",
@@ -9,6 +9,7 @@
     "start:dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/main",
+    "calibrate:face": "tsc -p tsconfig.json --outDir dist-tools && node dist-tools/scripts/calibrate-face.js",
     "lint": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix",
     "typecheck": "tsc --noEmit"
   },
