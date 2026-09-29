@@ -43,6 +43,14 @@ export interface BiometricIdentificationResult {
   /** true cuando el mejor match no se distingue lo suficiente del segundo (ver FACE_IDENTIFY_MARGIN). */
   ambiguous?: boolean;
   /**
+   * El rostro corresponde a una persona registrada pero DESHABILITADA. No se
+   * devuelve quién es (`person` queda vacío): el kiosco solo le avisa que su
+   * acceso no está habilitado y nunca la trata como "no registrada".
+   */
+  disabled?: boolean;
+  /** Id de la persona deshabilitada, solo para auditoría y bitácora internas: nunca sale al cliente. */
+  disabledPersonId?: number;
+  /**
    * Detalle interno del match. **Nunca sale al cliente**: el kiosco arma su
    * respuesta pública con `toPublicIdentifyResponse`. Lo consume la
    * adaptación de templates, que necesita saber con cuánta holgura ganó el
@@ -250,7 +258,10 @@ export class VerificationService {
 
     const vectorsByPerson = new Map<number, { person: BiometricPersonEntity; entries: TemplateVector[] }>();
     for (const template of templates) {
-      if (!template.person?.isActive) continue;
+      // Las personas deshabilitadas SÍ participan de la comparación: si no,
+      // su rostro se confundiría con "no registrada" (y podría volver a
+      // registrarse) o con un parecido activo. Se resuelve más abajo.
+      if (!template.person) continue;
       const entry = vectorsByPerson.get(template.person.id) ?? { person: template.person, entries: [] };
       entry.entries.push({
         templateId: template.id,
@@ -291,6 +302,12 @@ export class VerificationService {
     const runnerUp = candidates[1];
     if (runnerUp && runnerUp.distance - best.distance < this.identifyMargin) {
       return { matched: false, ambiguous: true };
+    }
+
+    // El mejor match es una persona deshabilitada: se avisa, pero no se concede
+    // ni se revela quién es ni con qué margen coincidió.
+    if (!best.person.isActive) {
+      return { matched: false, disabled: true, disabledPersonId: best.person.id };
     }
 
     let bestProbeIndex = 0;

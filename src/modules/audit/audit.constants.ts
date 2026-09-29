@@ -123,6 +123,7 @@ export const AUDIT_EVENT_TYPES = define({
   KIOSK_IDENTIFY_REJECTED: { category: 'KIOSK', severity: 'SEV3', outcome: 'FAILURE', label: 'Reconocimiento: foto rechazada al identificar' },
   KIOSK_CHECKIN_GRANTED: { category: 'KIOSK', severity: 'NORMAL', outcome: 'SUCCESS', label: 'Reconocimiento: ingreso concedido' },
   KIOSK_CHECKIN_DENIED: { category: 'KIOSK', severity: 'SEV3', outcome: 'DENIED', label: 'Reconocimiento: ingreso denegado (no reconocido)' },
+  KIOSK_CHECKIN_DISABLED_PERSON: { category: 'KIOSK', severity: 'SEV3', outcome: 'DENIED', label: 'Reconocimiento: ingreso denegado, la persona está deshabilitada' },
   KIOSK_CHECKIN_AMBIGUOUS: { category: 'KIOSK', severity: 'SEV2', outcome: 'DENIED', label: 'Reconocimiento: ingreso denegado por identificación ambigua' },
   KIOSK_CHECKIN_REJECTED: { category: 'KIOSK', severity: 'SEV3', outcome: 'FAILURE', label: 'Reconocimiento: fotos de ingreso rechazadas por calidad' },
   KIOSK_REGISTER_SUCCESS: { category: 'KIOSK', severity: 'NORMAL', outcome: 'SUCCESS', label: 'Reconocimiento: persona registrada' },

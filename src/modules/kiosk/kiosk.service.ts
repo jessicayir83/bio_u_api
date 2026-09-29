@@ -32,12 +32,15 @@ const MIN_VALID_REGISTER_PHOTOS = 2;
 
 export interface KioskIdentifyResponse {
   matched: boolean;
+  /** La persona está registrada pero deshabilitada: la pantalla muestra el aviso (sin nombre ni motivo). */
+  disabled?: boolean;
   person?: { id: number; firstName: string; lastName: string };
   ambiguous?: boolean;
 }
 
 export interface KioskCheckInResponse {
   granted: boolean;
+  disabled?: boolean;
   person?: { id: number; firstName: string; lastName: string };
   distance?: number;
   ambiguous?: boolean;
@@ -76,8 +79,8 @@ export class KioskService {
     const result = await this.identifyWithAudit(imageBuffers, 'KIOSK_IDENTIFY_REJECTED');
     this.auditService.annotate({
       eventType: result.matched ? 'KIOSK_IDENTIFY_MATCH' : result.ambiguous ? 'KIOSK_IDENTIFY_AMBIGUOUS' : 'KIOSK_IDENTIFY_NO_MATCH',
-      targetType: result.person ? 'Person' : undefined,
-      targetId: result.person?.id,
+      targetType: result.person || result.disabledPersonId ? 'Person' : undefined,
+      targetId: result.person?.id ?? result.disabledPersonId,
       details: { frames: imageBuffers.length, distance: result.distance ?? null },
     });
     return this.toPublicIdentifyResponse(result);
@@ -136,6 +139,24 @@ export class KioskService {
 
     // 2) ¿Esta cara ya está registrada? Con todas las fotos válidas, no solo la primera.
     const existingByFace = await this.verificationService.identifyDescriptors('Face', descriptors);
+    if (existingByFace.disabled) {
+      // Es una persona ya registrada pero deshabilitada: no se le permite crear un registro nuevo
+      // con otra identidad. Respuesta genérica (no revela el motivo) y se deriva a un humano.
+      this.auditService.annotate({
+        eventType: 'KIOSK_REGISTER_IDENTITY_MISMATCH',
+        targetType: 'Person',
+        targetId: existingByFace.disabledPersonId,
+        details: { reason: 'DISABLED_PERSON_REGISTRATION_ATTEMPT' },
+      });
+      await this.registrationService.record({
+        channel: 'KIOSK',
+        status: 'IDENTITY_MISMATCH',
+        identification,
+        personId: existingByFace.disabledPersonId,
+        detail: 'El rostro corresponde a una persona deshabilitada.',
+      });
+      throw new ConflictException('No se pudo completar el registro. Acercate a un operador para continuar.');
+    }
     if (existingByFace.matched && existingByFace.person) {
       // Misma cara con OTRA cédula = alguien ya registrado intentando una segunda identidad.
       const sameNationalId =
@@ -298,7 +319,7 @@ export class KioskService {
 
     const accessLog = await this.accessLogRepository.save(
       this.accessLogRepository.create({
-        personId: result.person?.id ?? null,
+        personId: result.person?.id ?? result.disabledPersonId ?? null,
         modality: 'Face',
         granted: result.matched,
         status: result.matched ? 'GRANTED' : result.ambiguous ? 'AMBIGUOUS' : 'DENIED',
@@ -315,14 +336,26 @@ export class KioskService {
     }
 
     this.auditService.annotate({
-      eventType: result.matched ? 'KIOSK_CHECKIN_GRANTED' : result.ambiguous ? 'KIOSK_CHECKIN_AMBIGUOUS' : 'KIOSK_CHECKIN_DENIED',
-      targetType: result.person ? 'Person' : undefined,
-      targetId: result.person?.id,
+      eventType: result.matched
+        ? 'KIOSK_CHECKIN_GRANTED'
+        : result.disabled
+          ? 'KIOSK_CHECKIN_DISABLED_PERSON'
+          : result.ambiguous
+            ? 'KIOSK_CHECKIN_AMBIGUOUS'
+            : 'KIOSK_CHECKIN_DENIED',
+      targetType: result.person || result.disabledPersonId ? 'Person' : undefined,
+      targetId: result.person?.id ?? result.disabledPersonId,
       details: { frames: imageBuffers.length, distance: result.distance ?? null, accessLogId: accessLog.id },
     });
 
     const publicResult = this.toPublicIdentifyResponse(result);
-    return { granted: publicResult.matched, person: publicResult.person, distance: result.distance, ambiguous: publicResult.ambiguous };
+    return {
+      granted: publicResult.matched,
+      person: publicResult.person,
+      distance: result.distance,
+      ambiguous: publicResult.ambiguous,
+      disabled: publicResult.disabled,
+    };
   }
 
   /**
@@ -386,6 +419,10 @@ export class KioskService {
 
   /** Nunca devuelve la cédula ni ningún otro dato sensible: estos endpoints son públicos. */
   private toPublicIdentifyResponse(result: BiometricIdentificationResult): KioskIdentifyResponse {
+    if (result.disabled) {
+      // Solo el aviso: ni nombre, ni id, ni motivo.
+      return { matched: false, disabled: true };
+    }
     if (!result.matched || !result.person) {
       return { matched: false, ambiguous: result.ambiguous };
     }
