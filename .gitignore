@@ -4,3 +4,4 @@ dist/
 *.log
 dist-tools/
 logs/
+.env.example
