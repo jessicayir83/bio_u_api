@@ -7,33 +7,34 @@ detrás de `JwtAuthGuard`. Cualquier endpoint nuevo que se agregue acá
 debe justificarse — es la cara expuesta del sistema.
 
 Mitigaciones aplicadas:
-- Límite de intentos por IP (`@Throttle`): 30/min general y **5/min en
+- Límite de intentos por IP (`@RateLimit('kiosk')`, números en `THROTTLE_KIOSK_LIMIT`): 30/min general y **5/min en
   `/kiosk/register`** (crear personas es lo sensible). El 30 no es
   arbitrario: la pantalla de "Ingresar" detecta el rostro en vivo y
   reintenta sola cada ~4-6s, así que un límite más bajo cortaría un uso
   legítimo. Sigue siendo barrera efectiva — cada request cuesta 1-3s de
   CPU a quien la haga.
-- **Respuestas mínimas**: solo `id`, `firstName`, `lastName`. Nunca la
-  cédula, ni listados, ni distancias en `identify`.
+- **Respuestas mínimas**: solo `firstName` (nunca `id`, apellido ni distancia). Nunca la
+  cédula ni listados. Todo conflicto del registro (cédula existente, rostro ya registrado, persona
+  deshabilitada, número reusado) responde el MISMO 409 genérico: el motivo real solo queda en auditoría.
 - Pendiente antes de producción (ver `plan_implementation`): restringir a
   la red local o exigir un token de kiosco (Fase 8, Device Gateway).
 
 ## Endpoints
 
 - `POST /kiosk/identify` (multipart `image`) — identificación 1:N.
-  Responde `{ matched, person?, ambiguous? }`. Lo usa "Registrarme" para
+  Responde `{ matched, person?: { firstName }, ambiguous?, disabled? }`. Lo usa "Registrarme" para
   no duplicar personas.
 - `POST /kiosk/register` (multipart `images` ×1-3 + `nationalId`,
   `firstName`, `lastName`, `dateOfBirth?`, **`consentAccepted=true`** y
   **`policyVersion`**) — 400 sin consentimiento o si la fecha de nacimiento
   es de un menor de 18 (se deriva a un operador); el consentimiento se
-  guarda en `[identity].PersonConsent`. 409 si la cara o la cédula
+  guarda en `[identity].PersonConsent`. 409 genérico si la cara o la cédula
   ya existen; 400 si ninguna foto tiene rostro detectable. Crea persona +
   enrollment `Face` `Completed` + un `Template` por foto válida (varios
   templates mejoran el match posterior).
 - `POST /kiosk/check-in` (multipart `image`) — identifica y graba
   `biometric.AccessLog` (concedido o denegado). Responde
-  `{ granted, person?, distance? }`.
+  `{ granted, person?: { firstName }, ambiguous?, disabled? }`.
 
 ## Usuario de sistema `kiosk`
 

@@ -1,11 +1,10 @@
-import { BadRequestException, Body, Controller, Get, Param, Post, Query, Res, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Get, Param, Post, Query, Res } from '@nestjs/common';
 import type { Response } from 'express';
 import { AuditService } from './audit.service';
 import { AuditEventsQueryDto } from './dto/audit-events-query.dto';
 import { AcknowledgeAlertDto } from './dto/acknowledge-alert.dto';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
-import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { RateLimit } from '../../common/throttler/rate-limit.decorator';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface';
 
@@ -20,7 +19,6 @@ function parseEventId(id: string): string {
 
 /** Dashboard de auditoría: exclusivo de Admin. Consultarlo también queda auditado (AUDIT_VIEWED). */
 @Controller('audit')
-@UseGuards(JwtAuthGuard, RolesGuard)
 @Roles('Admin')
 export class AuditController {
   constructor(private readonly auditService: AuditService) {}
@@ -54,6 +52,7 @@ export class AuditController {
 
   // Antes de 'events/:id' para que "export" no se tome como id.
   @Get('events/export')
+  @RateLimit('export')
   async export(@Query() query: AuditEventsQueryDto, @Res() res: Response) {
     const { csv, rows, truncated } = await this.auditService.exportCsv(query);
     const stamp = new Date().toISOString().replace(/[:.]/g, '-');

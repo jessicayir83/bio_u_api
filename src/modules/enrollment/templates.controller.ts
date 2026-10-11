@@ -1,8 +1,6 @@
-import { Body, Controller, Get, Param, ParseIntPipe, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, ParseIntPipe, Post, Query } from '@nestjs/common';
 import { IsOptional, IsString, MaxLength } from 'class-validator';
 import { TemplatesService } from './templates.service';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
-import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface';
@@ -25,7 +23,7 @@ export class RevokeTemplateDto {
  * decidió apagar.
  */
 @Controller('templates')
-@UseGuards(JwtAuthGuard)
+@Roles('Admin', 'Operator')
 export class TemplatesController {
   constructor(private readonly templatesService: TemplatesService) {}
 
@@ -35,7 +33,6 @@ export class TemplatesController {
   }
 
   @Post(':id/revoke')
-  @UseGuards(RolesGuard)
   @Roles('Admin')
   revoke(
     @Param('id', ParseIntPipe) id: number,
@@ -46,7 +43,6 @@ export class TemplatesController {
   }
 
   @Post(':id/restore')
-  @UseGuards(RolesGuard)
   @Roles('Admin')
   restore(@Param('id', ParseIntPipe) id: number) {
     return this.templatesService.restore(id);

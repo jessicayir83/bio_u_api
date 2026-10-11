@@ -1,13 +1,11 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Post, UseGuards } from '@nestjs/common';
-import { Throttle } from '@nestjs/throttler';
+import { Body, Controller, Get, HttpCode, HttpStatus, Post } from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
-import { JwtAuthGuard } from './guards/jwt-auth.guard';
-import { RolesGuard } from './guards/roles.guard';
-import { Roles } from './decorators/roles.decorator';
 import { CurrentUser } from './decorators/current-user.decorator';
+import { AnyAuthenticated, Public } from './decorators/access.decorator';
+import { RateLimit } from '../../common/throttler/rate-limit.decorator';
 import { AuthenticatedUser } from './interfaces/jwt-payload.interface';
 
 @Controller('auth')
@@ -15,19 +13,23 @@ export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
   @Post('login')
+  @RateLimit('auth')
+  @Public()
   async login(@Body() dto: LoginDto) {
     const user = await this.authService.validateUser(dto.username, dto.password);
     return this.authService.login(user);
   }
 
   @Post('refresh')
+  @RateLimit('auth')
+  @Public()
   async refresh(@Body() dto: RefreshTokenDto) {
     return this.authService.refresh(dto.refreshToken);
   }
 
   @Post('logout')
   @HttpCode(HttpStatus.OK)
-  @UseGuards(JwtAuthGuard)
+  @AnyAuthenticated()
   async logout(@CurrentUser() user: AuthenticatedUser, @Body() dto: RefreshTokenDto) {
     await this.authService.logout(user.userId, dto.refreshToken);
     return { message: 'Sesión cerrada.' };
@@ -36,31 +38,19 @@ export class AuthController {
   /** Cambio de la propia contraseña; límite bajo para frenar fuerza bruta sobre la actual. */
   @Post('change-password')
   @HttpCode(HttpStatus.OK)
-  @UseGuards(JwtAuthGuard)
-  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @AnyAuthenticated()
+  @RateLimit('passwordChange')
   async changePassword(@CurrentUser() user: AuthenticatedUser, @Body() dto: ChangePasswordDto) {
     return this.authService.changePassword(user.userId, dto.currentPassword, dto.newPassword);
   }
 
   /**
-   * Endpoint auxiliar temporal: hoy no existe ningún otro endpoint
-   * protegido en el proyecto para verificar JwtAuthGuard end-to-end.
-   * Se puede retirar cuando un módulo real (Fase 3+) cumpla ese rol.
+   * Datos de la propia sesión (los roles se releen de la BD en cada request).
    */
   @Get('me')
-  @UseGuards(JwtAuthGuard)
+  @AnyAuthenticated()
   me(@CurrentUser() user: AuthenticatedUser) {
     return user;
   }
-
-  /**
-   * Endpoint auxiliar temporal para verificar RolesGuard end-to-end.
-   * Se puede retirar cuando un módulo real (Fase 3+) cumpla ese rol.
-   */
-  @Get('admin-only')
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles('Admin')
-  adminOnly(@CurrentUser() user: AuthenticatedUser) {
-    return { message: `Hola ${user.username}, tienes acceso de Admin.` };
-  }
 }
+

@@ -1,4 +1,4 @@
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Like, Repository } from 'typeorm';
 import { BiometricPersonEntity } from './entities/biometric-person.entity';
@@ -15,6 +15,7 @@ import { CreatePersonDto } from './dto/create-person.dto';
 import { UpdatePersonDto } from './dto/update-person.dto';
 import { CreatePersonIdentifierDto } from './dto/create-person-identifier.dto';
 import { AuditService } from '../audit/audit.service';
+import type { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface';
 import { PersonRegistrationService, isUniqueViolation } from './person-registration.service';
 import { IDENTIFICATION_TYPE_LABELS, type IdentificationType } from './identification';
 import { AccessLogEntity } from '../kiosk/entities/access-log.entity';
@@ -34,6 +35,9 @@ export interface PersonPurgeResult {
   registrations: number;
   consents: number;
 }
+
+/** Tope del listado: evita volcar toda la tabla de PII en una sola respuesta. Falta paginación real en el panel (ver plan_implementation). */
+const MAX_PERSONS_LISTED = 500;
 
 @Injectable()
 export class PersonsService {
@@ -144,9 +148,10 @@ export class PersonsService {
     return person;
   }
 
-  async findAll(search?: string): Promise<BiometricPersonEntity[]> {
+  async findAll(rawSearch?: string): Promise<BiometricPersonEntity[]> {
+    const search = rawSearch?.slice(0, 100);
     const persons = !search
-      ? await this.personRepository.find({ order: { createdAt: 'DESC' } })
+      ? await this.personRepository.find({ order: { createdAt: 'DESC' }, take: MAX_PERSONS_LISTED })
       : await this.personRepository.find({
           where: [
             { nationalId: Like(`%${search.trim()}%`) },
@@ -155,6 +160,7 @@ export class PersonsService {
             { lastName: Like(`%${search.trim()}%`) },
           ],
           order: { createdAt: 'DESC' },
+          take: MAX_PERSONS_LISTED,
         });
     // El término buscado puede ser una cédula: se registra que hubo búsqueda, no su valor.
     this.auditService.annotate({ eventType: 'PERSON_LISTED', details: { searched: !!search, resultCount: persons.length } });
@@ -244,13 +250,23 @@ export class PersonsService {
     return this.registrationService.findForPerson(id, identification);
   }
 
-  async update(id: number, dto: UpdatePersonDto): Promise<BiometricPersonEntity> {
+  async update(id: number, dto: UpdatePersonDto, user: AuthenticatedUser): Promise<BiometricPersonEntity> {
     const person = await this.findOne(id);
     const changedFields = (Object.keys(dto) as Array<keyof UpdatePersonDto>).filter(
       (field) => dto[field] !== undefined && String(dto[field]) !== String(person[field] ?? ''),
     );
     const wasActive = person.isActive;
-    Object.assign(person, dto);
+    // Reactivar devuelve el acceso por reconocimiento facial: solo Admin (desactivar sí lo puede un Operator, como en DELETE).
+    if (dto.isActive === true && !wasActive && !user.roles.includes('Admin')) {
+      this.auditService.annotate({ eventType: 'PERSON_REACTIVATION_DENIED', targetType: 'Person', targetId: id });
+      throw new ForbiddenException('Solo un Admin puede reactivar a una persona.');
+    }
+    // Asignación explícita campo a campo (nunca Object.assign(entity, dto)):
+    // un campo nuevo en el DTO o la entidad no debe volverse editable por accidente.
+    if (dto.firstName !== undefined) person.firstName = dto.firstName;
+    if (dto.lastName !== undefined) person.lastName = dto.lastName;
+    if (dto.dateOfBirth !== undefined) person.dateOfBirth = dto.dateOfBirth;
+    if (dto.isActive !== undefined) person.isActive = dto.isActive;
     await this.personRepository.save(person);
     this.auditService.annotate({
       eventType: wasActive && dto.isActive === false ? 'PERSON_DEACTIVATED' : 'PERSON_UPDATED',

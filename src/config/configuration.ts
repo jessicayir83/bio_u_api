@@ -5,6 +5,8 @@
  * Ningún otro módulo debe leer process.env directamente:
  * siempre a través de este objeto (inyectado vía ConfigService).
  */
+export type RateLimitPolicy = 'default' | 'auth' | 'passwordChange' | 'biometric' | 'export' | 'kiosk' | 'kioskRegister';
+
 export interface AppConfig {
   port: number;
   nodeEnv: string;
@@ -26,6 +28,18 @@ export interface AppConfig {
    * directo al puerto no puede falsificar su IP con ese header.
    */
   trustProxy: string;
+  /**
+   * Orígenes web autorizados a llamar al API desde el navegador (CORS), separados por coma.
+   * Vacío en desarrollo = cualquier origen (como hasta ahora); vacío en producción = ninguno
+   * (el frontend servido bajo el mismo origen, p. ej. por el proxy /api, no necesita CORS).
+   */
+  corsOrigins: string[];
+  /**
+   * Rate limit por IP y por ruta (ver `common/throttler/`). `ttlSeconds` es la
+   * ventana; el resto son las peticiones permitidas dentro de ella por política.
+   * Se asignan con `@RateLimit('<política>')`; sin decorador aplica `default`.
+   */
+  throttle: Record<RateLimitPolicy, number> & { ttlSeconds: number };
   database: {
     host: string;
     port: number;
@@ -42,6 +56,9 @@ export interface AppConfig {
     issuer: string;
     audience: string;
     bcryptSaltRounds: number;
+    /** Bloqueo temporal de cuenta: fallos consecutivos que lo disparan y minutos que dura. */
+    lockoutMaxAttempts: number;
+    lockoutMinutes: number;
   };
   /** Auditoría (Fase 9) — ver api/src/modules/audit/README.md. */
   audit: {
@@ -66,6 +83,13 @@ export interface AppConfig {
     faceDetector: 'ssd' | 'tiny';
     faceModelsPath: string;
     faceMatchThreshold: number;
+    /**
+     * Cuántas extracciones de descriptor corren a la vez (cada una cuesta 1-3 s de CPU),
+     * cuántas pueden esperar y cuánto. Pasado eso el API responde 429: ver ConcurrencyLimiter.
+     */
+    faceMaxConcurrency: number;
+    faceQueueLimit: number;
+    faceQueueWaitMs: number;
     faceIdentifyMargin: number;
     /**
      * Templates adaptativos (Nivel 2): el sistema agrega vectores por su
@@ -117,6 +141,24 @@ export default (): AppConfig => ({
     certPath: process.env.HTTPS_CERT_PATH ?? '../certs/dev-cert.pem',
   },
   trustProxy: process.env.TRUST_PROXY ?? 'loopback',
+  corsOrigins: (process.env.CORS_ORIGINS ?? '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean),
+  throttle: {
+    ttlSeconds: parseInt(process.env.THROTTLE_TTL_SECONDS ?? '60', 10),
+    default: parseInt(process.env.THROTTLE_DEFAULT_LIMIT ?? '120', 10),
+    // Login y refresh: frena fuerza bruta de contraseñas por IP (además del bloqueo por cuenta).
+    auth: parseInt(process.env.THROTTLE_AUTH_LIMIT ?? '10', 10),
+    passwordChange: parseInt(process.env.THROTTLE_PASSWORD_CHANGE_LIMIT ?? '5', 10),
+    // Captura/verificación desde el panel: cada request cuesta 1-3 s de CPU (face-api WASM).
+    biometric: parseInt(process.env.THROTTLE_BIOMETRIC_LIMIT ?? '30', 10),
+    export: parseInt(process.env.THROTTLE_EXPORT_LIMIT ?? '10', 10),
+    // La pantalla "Ingresar" reintenta sola cada ~4-6 s mientras la persona se acomoda: no bajar de ~20.
+    kiosk: parseInt(process.env.THROTTLE_KIOSK_LIMIT ?? '30', 10),
+    // Más restrictivo: crear personas es la operación sensible.
+    kioskRegister: parseInt(process.env.THROTTLE_KIOSK_REGISTER_LIMIT ?? '5', 10),
+  },
   database: {
     host: process.env.DB_HOST ?? 'localhost',
     port: parseInt(process.env.DB_PORT ?? '1433', 10),
@@ -133,6 +175,8 @@ export default (): AppConfig => ({
     issuer: process.env.JWT_ISSUER ?? 'biometric-platform-api',
     audience: process.env.JWT_AUDIENCE ?? 'biometric-platform-clients',
     bcryptSaltRounds: parseInt(process.env.BCRYPT_SALT_ROUNDS ?? '10', 10),
+    lockoutMaxAttempts: parseInt(process.env.AUTH_LOCKOUT_MAX_ATTEMPTS ?? '5', 10),
+    lockoutMinutes: parseInt(process.env.AUTH_LOCKOUT_MINUTES ?? '15', 10),
   },
   audit: {
     fallbackFile: process.env.AUDIT_FALLBACK_FILE ?? 'logs/audit-fallback.jsonl',
@@ -146,6 +190,9 @@ export default (): AppConfig => ({
     faceDetector: process.env.FACE_DETECTOR === 'tiny' ? 'tiny' : 'ssd',
     faceModelsPath: process.env.FACE_MODELS_PATH ?? 'models',
     faceMatchThreshold: parseFloat(process.env.FACE_MATCH_THRESHOLD ?? '0.6'),
+    faceMaxConcurrency: parseInt(process.env.FACE_MAX_CONCURRENCY ?? '2', 10),
+    faceQueueLimit: parseInt(process.env.FACE_QUEUE_LIMIT ?? '10', 10),
+    faceQueueWaitMs: parseInt(process.env.FACE_QUEUE_WAIT_MS ?? '15000', 10),
     faceIdentifyMargin: parseFloat(process.env.FACE_IDENTIFY_MARGIN ?? '0.05'),
     adaptive: {
       // Arranca en `shadow` a propósito: el proyecto va a producción, y

@@ -9,7 +9,6 @@ import {
   Post,
   Query,
   UploadedFiles,
-  UseGuards,
   UseInterceptors,
 } from '@nestjs/common';
 import { FileFieldsInterceptor } from '@nestjs/platform-express';
@@ -17,31 +16,29 @@ import { type FacePoseStep, parsePoseSteps } from '../biometric-providers/face/f
 import { EnrollmentService } from './enrollment.service';
 import { CreateEnrollmentDto } from './dto/create-enrollment.dto';
 import { UpdateEnrollmentStatusDto } from './dto/update-enrollment-status.dto';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
-import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { RateLimit } from '../../common/throttler/rate-limit.decorator';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface';
 
-const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024;
+import { IMAGE_UPLOAD_LIMITS, MAX_IMAGE_SIZE_BYTES } from '../../common/uploads/upload-limits';
 /** Un enrollment guiado son 3 poses; la subida de archivo manda una sola. */
 const MAX_CAPTURE_PHOTOS = 3;
 
 @Controller('enrollments')
-@UseGuards(JwtAuthGuard)
+@Roles('Admin', 'Operator')
 export class EnrollmentController {
   constructor(private readonly enrollmentService: EnrollmentService) {}
 
   @Post()
-  @UseGuards(RolesGuard)
   @Roles('Admin', 'Operator')
   create(@Body() dto: CreateEnrollmentDto, @CurrentUser() user: AuthenticatedUser) {
     return this.enrollmentService.create(dto, user.userId);
   }
 
   @Get()
-  findAll(@Query('personId') personId?: string, @Query('status') status?: string) {
-    return this.enrollmentService.findAll(personId ? parseInt(personId, 10) : undefined, status);
+  findAll(@Query('personId', new ParseIntPipe({ optional: true })) personId?: number, @Query('status') status?: string) {
+    return this.enrollmentService.findAll(personId, status);
   }
 
   @Get(':id')
@@ -50,10 +47,9 @@ export class EnrollmentController {
   }
 
   @Patch(':id/status')
-  @UseGuards(RolesGuard)
   @Roles('Admin', 'Operator')
-  updateStatus(@Param('id', ParseIntPipe) id: number, @Body() dto: UpdateEnrollmentStatusDto) {
-    return this.enrollmentService.updateStatus(id, dto);
+  updateStatus(@Param('id', ParseIntPipe) id: number, @Body() dto: UpdateEnrollmentStatusDto, @CurrentUser() user: AuthenticatedUser) {
+    return this.enrollmentService.updateStatus(id, dto, user);
   }
 
   /**
@@ -63,17 +59,21 @@ export class EnrollmentController {
    * con el flujo anterior, igual que hace el kiosco.
    */
   @Post(':id/capture')
-  @UseGuards(RolesGuard)
+  @RateLimit('biometric')
   @Roles('Admin', 'Operator')
   @UseInterceptors(
-    FileFieldsInterceptor([
-      { name: 'images', maxCount: MAX_CAPTURE_PHOTOS },
-      { name: 'image', maxCount: 1 },
-    ]),
+    FileFieldsInterceptor(
+      [
+        { name: 'images', maxCount: MAX_CAPTURE_PHOTOS },
+        { name: 'image', maxCount: 1 },
+      ],
+      { limits: IMAGE_UPLOAD_LIMITS },
+    ),
   )
   capture(
     @Param('id', ParseIntPipe) id: number,
     @UploadedFiles() files: { images?: Express.Multer.File[]; image?: Express.Multer.File[] },
+    @CurrentUser() user: AuthenticatedUser,
     @Body('steps') steps?: string,
   ) {
     const uploaded = [...(files?.images ?? []), ...(files?.image ?? [])];
@@ -100,6 +100,7 @@ export class EnrollmentController {
     return this.enrollmentService.capture(
       id,
       uploaded.map((file) => file.buffer),
+      user,
       poseSteps,
     );
   }

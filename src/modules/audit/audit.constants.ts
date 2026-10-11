@@ -61,6 +61,9 @@ export const AUDIT_EVENT_TYPES = define({
   AUTH_TOKEN_MISSING: { category: 'AUTH', severity: 'SEV3', outcome: 'DENIED', label: 'Acceso a recurso protegido sin token' },
   AUTH_TOKEN_INVALID: { category: 'SECURITY', severity: 'SEV2', outcome: 'DENIED', label: 'Token con firma o formato inválido' },
   AUTH_ACCESS_DENIED_ROLE: { category: 'SECURITY', severity: 'SEV2', outcome: 'DENIED', label: 'Acceso denegado por rol insuficiente' },
+  AUTH_ACCOUNT_LOCKED: { category: 'SECURITY', severity: 'SEV2', outcome: 'DENIED', label: 'Cuenta bloqueada temporalmente por intentos fallidos' },
+  AUTH_LOGIN_BLOCKED_LOCKED: { category: 'SECURITY', severity: 'SEV3', outcome: 'DENIED', label: 'Intento de login contra una cuenta bloqueada' },
+  AUTH_ACCESS_DENIED_NO_POLICY: { category: 'SECURITY', severity: 'SEV2', outcome: 'DENIED', label: 'Ruta sin política de acceso declarada (denegada)' },
   AUTH_PASSWORD_CHANGED: { category: 'AUTH', severity: 'NORMAL', outcome: 'SUCCESS', label: 'Contraseña propia cambiada' },
   AUTH_PASSWORD_CHANGE_FAILED: { category: 'AUTH', severity: 'SEV3', outcome: 'FAILURE', label: 'Cambio de contraseña rechazado' },
 
@@ -93,6 +96,8 @@ export const AUDIT_EVENT_TYPES = define({
   // --- Enrollment / biometría ---
   ENROLLMENT_LISTED: { category: 'ENROLLMENT', severity: 'NORMAL', outcome: 'SUCCESS', label: 'Consulta de enrollments' },
   ENROLLMENT_VIEWED: { category: 'ENROLLMENT', severity: 'NORMAL', outcome: 'SUCCESS', label: 'Consulta de un enrollment' },
+  ENROLLMENT_ACCESS_DENIED: { category: 'SECURITY', severity: 'SEV2', outcome: 'DENIED', label: 'Intento de operar sobre un enrollment ajeno' },
+  PERSON_REACTIVATION_DENIED: { category: 'SECURITY', severity: 'SEV2', outcome: 'DENIED', label: 'Intento de reactivar una persona sin ser Admin' },
   ENROLLMENT_CREATED: { category: 'ENROLLMENT', severity: 'NORMAL', outcome: 'SUCCESS', label: 'Enrollment creado' },
   ENROLLMENT_STATUS_CHANGED: { category: 'ENROLLMENT', severity: 'NORMAL', outcome: 'SUCCESS', label: 'Estado de enrollment cambiado' },
   ENROLLMENT_REVOKED: { category: 'ENROLLMENT', severity: 'SEV3', outcome: 'SUCCESS', label: 'Enrollment revocado' },

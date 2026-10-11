@@ -1,5 +1,6 @@
 import { Controller, Get } from '@nestjs/common';
 import { DataSource } from 'typeorm';
+import { Public } from '../modules/auth/decorators/access.decorator';
 
 /**
  * Endpoint de salud (Fase 1).
@@ -12,6 +13,7 @@ import { DataSource } from 'typeorm';
  * la cadena completa Frontend -> API -> SQL Server.
  */
 @Controller('health')
+@Public()
 export class HealthController {
   constructor(private readonly dataSource: DataSource) {}
 

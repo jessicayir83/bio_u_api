@@ -27,6 +27,14 @@ export class UserEntity {
   @UpdateDateColumn({ name: 'UpdatedAt', type: 'datetime2', nullable: true })
   updatedAt: Date | null;
 
+  /** Fallos de contraseña consecutivos; ver bio_u_db/11_user_lockout.sql. */
+  @Column({ name: 'FailedAttempts', type: 'int', default: 0 })
+  failedAttempts: number;
+
+  /** Cuenta bloqueada hasta esta fecha (null = no bloqueada). */
+  @Column({ name: 'LockedUntil', type: 'datetime2', nullable: true })
+  lockedUntil: Date | null;
+
   @Column({ name: 'LastLoginAt', type: 'datetime2', nullable: true })
   lastLoginAt: Date | null;
 

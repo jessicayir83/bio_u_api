@@ -1,20 +1,24 @@
 import { BadRequestException, Body, Controller, Ip, Post, UploadedFiles, UseInterceptors } from '@nestjs/common';
 import { FileFieldsInterceptor, FilesInterceptor } from '@nestjs/platform-express';
-import { Throttle } from '@nestjs/throttler';
+import { Public } from '../auth/decorators/access.decorator';
+import { RateLimit } from '../../common/throttler/rate-limit.decorator';
 import { KioskService } from './kiosk.service';
 import { KioskRegisterDto } from './dto/kiosk-register.dto';
 import { type FacePoseStep, parsePoseSteps } from '../biometric-providers/face/face-quality';
 
-const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024;
+import { IMAGE_UPLOAD_LIMITS, MAX_IMAGE_SIZE_BYTES } from '../../common/uploads/upload-limits';
 const MAX_REGISTER_PHOTOS = 3;
 /** Frames de un mismo intento de identificación (ver VerificationService.identifyDescriptors). */
 const MAX_PROBE_PHOTOS = 3;
 
 /** identify/check-in aceptan `images` (varios frames) o `image` (uno, compatibilidad con clientes previos/Postman). */
-const probeFilesInterceptor = FileFieldsInterceptor([
-  { name: 'images', maxCount: MAX_PROBE_PHOTOS },
-  { name: 'image', maxCount: 1 },
-]);
+const probeFilesInterceptor = FileFieldsInterceptor(
+  [
+    { name: 'images', maxCount: MAX_PROBE_PHOTOS },
+    { name: 'image', maxCount: 1 },
+  ],
+  { limits: IMAGE_UPLOAD_LIMITS },
+);
 
 type ProbeUpload = { images?: Express.Multer.File[]; image?: Express.Multer.File[] };
 
@@ -36,11 +40,12 @@ function toProbeBuffers(files: ProbeUpload = {}): Buffer[] {
  * consultar contra la base de personas.
  */
 @Controller('kiosk')
+@Public()
 // 30/min: la pantalla de "Ingresar" detecta el rostro en vivo y reintenta
 // sola cada ~4-6s mientras la persona se acomoda, así que un límite bajo
 // cortaría un uso legítimo. Sigue siendo una barrera efectiva: cada
 // request le cuesta 1-3s de CPU a quien la haga.
-@Throttle({ default: { limit: 30, ttl: 60_000 } })
+@RateLimit('kiosk')
 export class KioskController {
   constructor(private readonly kioskService: KioskService) {}
 
@@ -51,9 +56,9 @@ export class KioskController {
   }
 
   // Más restrictivo que el resto: crear personas es la operación sensible.
-  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @RateLimit('kioskRegister')
   @Post('register')
-  @UseInterceptors(FilesInterceptor('images', MAX_REGISTER_PHOTOS))
+  @UseInterceptors(FilesInterceptor('images', MAX_REGISTER_PHOTOS, { limits: IMAGE_UPLOAD_LIMITS }))
   register(@Body() dto: KioskRegisterDto, @UploadedFiles() images: Express.Multer.File[] = []) {
     if (images.some((image) => image.size > MAX_IMAGE_SIZE_BYTES)) {
       throw new BadRequestException('Alguna de las fotos supera el tamaño máximo permitido (5MB).');

@@ -1,20 +1,20 @@
-import { Controller, MaxFileSizeValidator, Param, ParseFilePipe, ParseIntPipe, Post, UploadedFile, UseGuards, UseInterceptors } from '@nestjs/common';
+import { Controller, MaxFileSizeValidator, Param, ParseFilePipe, ParseIntPipe, Post, UploadedFile, UseInterceptors } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
+import { IMAGE_UPLOAD_LIMITS } from '../../common/uploads/upload-limits';
 import { VerificationService } from './verification.service';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
-import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { RateLimit } from '../../common/throttler/rate-limit.decorator';
 
 const MAX_SAMPLE_SIZE_BYTES = 5 * 1024 * 1024;
 
 @Controller('verification')
-@UseGuards(JwtAuthGuard, RolesGuard)
 @Roles('Admin', 'Operator')
+@RateLimit('biometric')
 export class VerificationController {
   constructor(private readonly verificationService: VerificationService) {}
 
   @Post('faces/:personId')
-  @UseInterceptors(FileInterceptor('image'))
+  @UseInterceptors(FileInterceptor('image', { limits: IMAGE_UPLOAD_LIMITS }))
   verifyFace(
     @Param('personId', ParseIntPipe) personId: number,
     @UploadedFile(
@@ -28,7 +28,7 @@ export class VerificationController {
   }
 
   @Post('fingerprints/:personId')
-  @UseInterceptors(FileInterceptor('image'))
+  @UseInterceptors(FileInterceptor('image', { limits: IMAGE_UPLOAD_LIMITS }))
   verifyFingerprint(
     @Param('personId', ParseIntPipe) personId: number,
     @UploadedFile(

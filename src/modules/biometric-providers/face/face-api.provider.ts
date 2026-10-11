@@ -7,6 +7,7 @@ import * as wasm from '@tensorflow/tfjs-backend-wasm';
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 import * as faceapi from '@vladmandic/face-api/dist/face-api.node-wasm.js';
 import { AppConfig } from '../../../config/configuration';
+import { ConcurrencyLimiter } from '../../../common/concurrency/concurrency-limiter';
 import {
   BiometricCompareResult,
   BiometricDescriptor,
@@ -48,6 +49,7 @@ export class FaceApiProvider implements BiometricProvider, OnModuleInit {
   private readonly matchThreshold: number;
   private readonly modelsPath: string;
   private readonly detector: FaceDetectorKind;
+  private readonly limiter: ConcurrencyLimiter;
   private modelsLoaded = false;
   private detectorOptions: any;
 
@@ -56,6 +58,7 @@ export class FaceApiProvider implements BiometricProvider, OnModuleInit {
     this.matchThreshold = biometrics.faceMatchThreshold;
     this.modelsPath = path.resolve(process.cwd(), biometrics.faceModelsPath);
     this.detector = biometrics.faceDetector;
+    this.limiter = new ConcurrencyLimiter(biometrics.faceMaxConcurrency, biometrics.faceQueueLimit, biometrics.faceQueueWaitMs);
   }
 
   async onModuleInit(): Promise<void> {
@@ -80,7 +83,11 @@ export class FaceApiProvider implements BiometricProvider, OnModuleInit {
     );
   }
 
-  async extractDescriptor(imageBuffer: Buffer, options: ExtractDescriptorOptions = {}): Promise<BiometricDescriptor> {
+  extractDescriptor(imageBuffer: Buffer, options: ExtractDescriptorOptions = {}): Promise<BiometricDescriptor> {
+    return this.limiter.run(() => this.extractDescriptorUnlimited(imageBuffer, options));
+  }
+
+  private async extractDescriptorUnlimited(imageBuffer: Buffer, options: ExtractDescriptorOptions): Promise<BiometricDescriptor> {
     if (!this.modelsLoaded) {
       throw new Error('FaceApiProvider: los modelos todavía no terminan de cargar.');
     }

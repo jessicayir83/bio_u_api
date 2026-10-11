@@ -19,6 +19,8 @@ import { templateProvenanceFields } from './template-fields';
 import { AuditService } from '../audit/audit.service';
 import { ConfigService } from '@nestjs/config';
 import { AppConfig } from '../../config/configuration';
+import { assertCanActOnOwned } from '../../common/authorization/ownership';
+import type { AuthenticatedUser } from '../auth/interfaces/jwt-payload.interface';
 
 const SUPPORTED_MODALITIES = ['Face', 'Fingerprint'] as const;
 type SupportedModality = (typeof SUPPORTED_MODALITIES)[number];
@@ -72,6 +74,18 @@ export class EnrollmentService {
     return enrollment;
   }
 
+  /** ABAC: solo Admin o quien creó el enrollment puede capturar o cambiar su estado. */
+  private assertCanOperate(enrollment: EnrollmentEntity, user: AuthenticatedUser): void {
+    assertCanActOnOwned(user, enrollment.createdByUserId, () =>
+      this.auditService.annotate({
+        eventType: 'ENROLLMENT_ACCESS_DENIED',
+        targetType: 'Enrollment',
+        targetId: enrollment.id,
+        details: { personId: enrollment.personId },
+      }),
+    );
+  }
+
   async findAll(personId?: number, status?: string): Promise<EnrollmentEntity[]> {
     const where: Record<string, unknown> = {};
     if (personId) where.personId = personId;
@@ -88,8 +102,9 @@ export class EnrollmentService {
     return enrollment;
   }
 
-  async updateStatus(id: number, dto: UpdateEnrollmentStatusDto): Promise<EnrollmentEntity> {
+  async updateStatus(id: number, dto: UpdateEnrollmentStatusDto, user: AuthenticatedUser): Promise<EnrollmentEntity> {
     const enrollment = await this.findOne(id);
+    this.assertCanOperate(enrollment, user);
     const previousStatus = enrollment.status;
     enrollment.status = dto.status;
     if (dto.status === 'Completed') {
@@ -121,8 +136,9 @@ export class EnrollmentService {
    * medias dejaría a la persona con una galería incompleta y el enrollment
    * consumido.
    */
-  async capture(id: number, sampleBuffers: Buffer[], poseSteps?: FacePoseStep[]): Promise<EnrollmentEntity> {
+  async capture(id: number, sampleBuffers: Buffer[], user: AuthenticatedUser, poseSteps?: FacePoseStep[]): Promise<EnrollmentEntity> {
     const enrollment = await this.findOne(id);
+    this.assertCanOperate(enrollment, user);
 
     const provider = this.providersByModality[enrollment.modality as SupportedModality];
     if (!provider) {

@@ -14,6 +14,7 @@ import { AuditService } from '../audit/audit.service';
 @Injectable()
 export class AuthService {
   private readonly authConfig: AppConfig['auth'];
+  private readonly dummyPasswordHash: string;
 
   constructor(
     @InjectRepository(UserEntity)
@@ -25,12 +26,19 @@ export class AuthService {
     configService: ConfigService,
   ) {
     this.authConfig = configService.get<AppConfig['auth']>('auth')!;
+    // Hash falso para igualar el tiempo de respuesta cuando el usuario no existe o está bloqueado.
+    this.dummyPasswordHash = bcrypt.hashSync(randomBytes(16).toString('hex'), this.authConfig.bcryptSaltRounds);
   }
 
   /**
-   * No distingue "usuario no existe" de "password incorrecta" para evitar
-   * enumeración de usuarios (la respuesta es la misma). La auditoría sí
+   * No distingue "usuario no existe", "password incorrecta" ni "cuenta bloqueada" para evitar
+   * enumeración de usuarios (la respuesta es siempre la misma). La auditoría sí
    * guarda el motivo real, porque solo la ve un Admin.
+   *
+   * Bloqueo temporal: tras `lockoutMaxAttempts` fallos consecutivos la cuenta queda
+   * bloqueada `lockoutMinutes` (script bio_u_db/11_user_lockout.sql). Siempre se hace
+   * un bcrypt.compare (contra un hash falso si no hay usuario o está bloqueado) para que
+   * el tiempo de respuesta no delate si la cuenta existe.
    */
   async validateUser(username: string, password: string): Promise<UserEntity> {
     const user = await this.userRepository.findOne({
@@ -38,7 +46,18 @@ export class AuthService {
       relations: { userRoles: { role: true } },
     });
 
-    const passwordMatches = user ? await bcrypt.compare(password, user.passwordHash) : false;
+    const isLocked = !!user?.lockedUntil && user.lockedUntil.getTime() > Date.now();
+    const passwordMatches = await bcrypt.compare(password, user && !isLocked ? user.passwordHash : this.dummyPasswordHash);
+
+    if (user && isLocked) {
+      this.auditService.annotate({
+        eventType: 'AUTH_LOGIN_BLOCKED_LOCKED',
+        actorUserId: user.id,
+        actorUsername: user.username,
+        details: { lockedUntil: user.lockedUntil },
+      });
+      throw new UnauthorizedException('Credenciales inválidas.');
+    }
 
     if (!user || !user.isActive || !passwordMatches) {
       if (user && !user.isActive) {
@@ -49,12 +68,13 @@ export class AuthService {
           actorUsername: user.username,
           details: { passwordMatched: passwordMatches },
         });
+      } else if (user) {
+        await this.registerFailedAttempt(user);
       } else {
         this.auditService.annotate({
           eventType: 'AUTH_LOGIN_FAILED',
-          actorUserId: user?.id,
           actorUsername: username,
-          details: { reason: user ? 'BAD_PASSWORD' : 'USER_NOT_FOUND' },
+          details: { reason: 'USER_NOT_FOUND' },
         });
       }
       throw new UnauthorizedException('Credenciales inválidas.');
@@ -62,6 +82,26 @@ export class AuthService {
 
     return user;
   }
+
+  /** Cuenta el fallo; al llegar al tope bloquea la cuenta (y deja una alerta SEV2 en la bitácora). */
+  private async registerFailedAttempt(user: UserEntity): Promise<void> {
+    const attempts = (user.failedAttempts ?? 0) + 1;
+    const reachedLimit = attempts >= this.authConfig.lockoutMaxAttempts;
+
+    user.failedAttempts = reachedLimit ? 0 : attempts;
+    user.lockedUntil = reachedLimit ? new Date(Date.now() + this.authConfig.lockoutMinutes * 60 * 1000) : user.lockedUntil;
+    await this.userRepository.update(user.id, { failedAttempts: user.failedAttempts, lockedUntil: user.lockedUntil });
+
+    this.auditService.annotate({
+      eventType: reachedLimit ? 'AUTH_ACCOUNT_LOCKED' : 'AUTH_LOGIN_FAILED',
+      actorUserId: user.id,
+      actorUsername: user.username,
+      details: reachedLimit
+        ? { reason: 'TOO_MANY_FAILED_ATTEMPTS', lockedUntil: user.lockedUntil, lockoutMinutes: this.authConfig.lockoutMinutes }
+        : { reason: 'BAD_PASSWORD', failedAttempts: attempts },
+    });
+  }
+
 
   async login(user: UserEntity): Promise<AuthResponse> {
     const roles = user.userRoles.map((userRole) => userRole.role.name);
@@ -80,6 +120,9 @@ export class AuthService {
     });
 
     user.lastLoginAt = new Date();
+    // Login correcto: se limpia el contador de fallos y cualquier bloqueo vencido.
+    user.failedAttempts = 0;
+    user.lockedUntil = null;
     await this.userRepository.save(user);
 
     return {
@@ -122,6 +165,12 @@ export class AuthService {
     if (existing.expiresAt.getTime() < Date.now()) {
       this.auditService.annotate({ eventType: 'AUTH_REFRESH_FAILED', ...actor, details: { reason: 'TOKEN_EXPIRED' } });
       throw new UnauthorizedException('Refresh token expirado.');
+    }
+
+    // Un usuario desactivado no puede seguir renovando su sesión.
+    if (!existing.user?.isActive) {
+      this.auditService.annotate({ eventType: 'AUTH_REFRESH_FAILED', ...actor, details: { reason: 'USER_INACTIVE' } });
+      throw new UnauthorizedException('Refresh token inválido.');
     }
 
     const roles = existing.user.userRoles.map((userRole) => userRole.role.name);

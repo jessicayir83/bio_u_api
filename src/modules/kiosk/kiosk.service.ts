@@ -27,6 +27,12 @@ import { AppConfig } from '../../config/configuration';
 
 /** Username del usuario de sistema que queda como autor de lo registrado en el kiosco (lo siembra el script 05). */
 const KIOSK_SYSTEM_USERNAME = 'kiosk';
+/**
+ * Único mensaje ante cualquier conflicto de identidad en el registro público (cédula existente, rostro ya
+ * registrado, persona deshabilitada, número reusado): distintos mensajes convertirían al kiosco en un
+ * oráculo para averiguar quién está registrado. El motivo real queda solo en auditoría.
+ */
+const KIOSK_REGISTER_CONFLICT_MESSAGE = 'No se pudo completar el registro. Acercate a un operador para continuar.';
 /** Fotos de calidad suficiente que exige el registro (o todas, si se mandaron menos). */
 const MIN_VALID_REGISTER_PHOTOS = 2;
 
@@ -34,15 +40,21 @@ export interface KioskIdentifyResponse {
   matched: boolean;
   /** La persona está registrada pero deshabilitada: la pantalla muestra el aviso (sin nombre ni motivo). */
   disabled?: boolean;
-  person?: { id: number; firstName: string; lastName: string };
+  /** Solo el nombre de pila: el endpoint es público (nunca id, apellido ni cédula). */
+  person?: { firstName: string };
   ambiguous?: boolean;
+}
+
+/** El registro no devuelve la entidad: solo confirma. */
+export interface KioskRegisterResponse {
+  registered: true;
 }
 
 export interface KioskCheckInResponse {
   granted: boolean;
   disabled?: boolean;
-  person?: { id: number; firstName: string; lastName: string };
-  distance?: number;
+  /** Solo el nombre de pila: el endpoint es público (nunca id, apellido ni cédula). */
+  person?: { firstName: string };
   ambiguous?: boolean;
 }
 
@@ -90,7 +102,7 @@ export class KioskService {
    * Los problemas con las fotos responden 422 (no 400) para que la pantalla
    * distinga "volvé a sacar las fotos" de un error en los datos del formulario.
    */
-  async register(dto: KioskRegisterDto, imageBuffers: Buffer[], poseSteps?: FacePoseStep[]): Promise<BiometricPersonEntity> {
+  async register(dto: KioskRegisterDto, imageBuffers: Buffer[], poseSteps?: FacePoseStep[]): Promise<KioskRegisterResponse> {
     if (imageBuffers.length === 0) {
       throw new BadRequestException('Se requiere al menos una foto.');
     }
@@ -155,7 +167,7 @@ export class KioskService {
         personId: existingByFace.disabledPersonId,
         detail: 'El rostro corresponde a una persona deshabilitada.',
       });
-      throw new ConflictException('No se pudo completar el registro. Acercate a un operador para continuar.');
+      throw new ConflictException(KIOSK_REGISTER_CONFLICT_MESSAGE);
     }
     if (existingByFace.matched && existingByFace.person) {
       // Misma cara con OTRA cédula = alguien ya registrado intentando una segunda identidad.
@@ -177,13 +189,9 @@ export class KioskService {
         targetId: existingByFace.person.id,
         details: { distance: existingByFace.distance ?? null, sameIdentification: sameNationalId },
       });
-      if (!sameNationalId) {
-        // No revelar a quién pertenece esa cara a alguien que declaró otra identidad.
-        throw new ConflictException('No se pudo completar el registro. Acercate a un operador para continuar.');
-      }
-      throw new ConflictException(
-        `Esta persona ya está registrada como ${existingByFace.person.firstName} ${existingByFace.person.lastName}. Usá "Ingresar".`,
-      );
+      // Ni el nombre ni el motivo: ver KIOSK_REGISTER_CONFLICT_MESSAGE. (La persona que ya está
+      // registrada se entera por el paso "ya estás registrado" del primer frame, o en "Ingresar".)
+      throw new ConflictException(KIOSK_REGISTER_CONFLICT_MESSAGE);
     }
 
     // 3) ¿La cédula ya existe?
@@ -204,7 +212,7 @@ export class KioskService {
         personId: existingByNationalId.id,
         detail: 'La identificación ya pertenece a una persona y el rostro no coincide.',
       });
-      throw new ConflictException('Ya existe una persona registrada con ese tipo y número de identificación.');
+      throw new ConflictException(KIOSK_REGISTER_CONFLICT_MESSAGE);
     }
 
     // 3.b) El mismo número bajo OTRO tipo de identificación. En el panel esto
@@ -228,7 +236,7 @@ export class KioskService {
         personId: otherType.id,
         detail: `El número ya existe con el tipo ${otherType.identificationType}.`,
       });
-      throw new ConflictException('No se pudo completar el registro. Acercate a un operador para continuar.');
+      throw new ConflictException(KIOSK_REGISTER_CONFLICT_MESSAGE);
     }
 
     // 4) Crear persona + enrollment + un template por foto válida.
@@ -249,7 +257,7 @@ export class KioskService {
     } catch (err) {
       // Dos registros simultáneos con la misma identificación: el índice único frena al segundo.
       if (isUniqueViolation(err)) {
-        throw new ConflictException('Ya existe una persona registrada con ese tipo y número de identificación.');
+        throw new ConflictException(KIOSK_REGISTER_CONFLICT_MESSAGE);
       }
       throw err;
     }
@@ -295,7 +303,7 @@ export class KioskService {
         identificationType: identification.identificationType,
       },
     });
-    return person;
+    return { registered: true };
   }
 
   async checkIn(imageBuffers: Buffer[], sourceIp: string | null): Promise<KioskCheckInResponse> {
@@ -352,7 +360,6 @@ export class KioskService {
     return {
       granted: publicResult.matched,
       person: publicResult.person,
-      distance: result.distance,
       ambiguous: publicResult.ambiguous,
       disabled: publicResult.disabled,
     };
@@ -428,7 +435,7 @@ export class KioskService {
     }
     return {
       matched: true,
-      person: { id: result.person.id, firstName: result.person.firstName, lastName: result.person.lastName },
+      person: { firstName: result.person.firstName },
     };
   }
 

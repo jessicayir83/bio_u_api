@@ -1,6 +1,6 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { In, Not, Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcryptjs';
 import { UserEntity } from '../auth/entities/user.entity';
@@ -85,12 +85,22 @@ export class UsersService {
     return this.findOne(user.id);
   }
 
-  async update(id: number, dto: UpdateUserDto): Promise<UserSummary> {
+  async update(id: number, dto: UpdateUserDto, actingUserId: number): Promise<UserSummary> {
     const user = await this.userRepository.findOne({ where: { id } });
     if (!user) {
       throw new NotFoundException(`No existe un usuario con id ${id}.`);
     }
     const before = await this.findOne(id);
+
+    if (dto.roleIds && before.roles.includes('Admin')) {
+      const newRoles = await this.roleRepository.findBy({ id: In(dto.roleIds) });
+      if (!newRoles.some((role) => role.name === 'Admin')) {
+        if (id === actingUserId) {
+          throw new BadRequestException('No puedes quitarte a ti mismo el rol Admin.');
+        }
+        await this.assertAnotherActiveAdminExists(id);
+      }
+    }
 
     if (dto.email && dto.email !== user.email) {
       const emailTaken = await this.userRepository.findOne({ where: { email: dto.email } });
@@ -132,14 +142,32 @@ export class UsersService {
     return after;
   }
 
-  async deactivate(id: number): Promise<void> {
-    const user = await this.userRepository.findOne({ where: { id } });
+  async deactivate(id: number, actingUserId: number): Promise<void> {
+    if (id === actingUserId) {
+      throw new BadRequestException('No puedes deshabilitar tu propia cuenta.');
+    }
+    const user = await this.userRepository.findOne({ where: { id }, relations: { userRoles: { role: true } } });
     if (!user) {
       throw new NotFoundException(`No existe un usuario con id ${id}.`);
     }
+    if (user.isActive && user.userRoles.some((userRole) => userRole.role.name === 'Admin')) {
+      await this.assertAnotherActiveAdminExists(id);
+    }
     user.isActive = false;
     await this.userRepository.save(user);
+    // Cierra sus sesiones: sin esto seguiría renovando tokens con el refresh token.
+    await this.authService.revokeAllSessions(id);
     this.auditService.annotate({ eventType: 'USER_DEACTIVATED', targetType: 'User', targetId: id, details: { username: user.username } });
+  }
+
+  /** Nunca se puede dejar el sistema sin ninguna cuenta Admin activa. */
+  private async assertAnotherActiveAdminExists(excludingUserId: number): Promise<void> {
+    const otherAdmins = await this.userRepository.count({
+      where: { id: Not(excludingUserId), isActive: true, userRoles: { role: { name: 'Admin' } } },
+    });
+    if (otherAdmins === 0) {
+      throw new BadRequestException('Debe quedar al menos una cuenta Admin activa.');
+    }
   }
 
   async activate(id: number): Promise<UserSummary> {
@@ -169,6 +197,9 @@ export class UsersService {
     }
 
     user.passwordHash = await bcrypt.hash(newPassword, this.bcryptSaltRounds);
+    // Un Admin que reasigna la contraseña también levanta el bloqueo por intentos fallidos.
+    user.failedAttempts = 0;
+    user.lockedUntil = null;
     await this.userRepository.save(user);
     await this.authService.revokeAllSessions(id);
     this.auditService.annotate({

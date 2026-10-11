@@ -9,6 +9,7 @@
     "start:dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/main",
+    "check:routes": "tsc -p tsconfig.json --outDir dist-tools && node dist-tools/scripts/check-route-policies.js",
     "calibrate:face": "tsc -p tsconfig.json --outDir dist-tools && node dist-tools/scripts/calibrate-face.js",
     "lint": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix",
     "typecheck": "tsc --noEmit"
@@ -28,6 +29,7 @@
     "bcryptjs": "^2.4.3",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.4",
+    "helmet": "^8.3.0",
     "jimp": "^1.6.1",
     "mssql": "^11.0.1",
     "passport": "^0.7.0",

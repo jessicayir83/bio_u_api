@@ -1,6 +1,7 @@
 import { NestFactory } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
 import { ValidationPipe } from '@nestjs/common';
+import helmet from 'helmet';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import type { HttpsOptions } from '@nestjs/common/interfaces/external/https-options.interface';
 import * as fs from 'fs';
@@ -44,10 +45,21 @@ async function bootstrap() {
   const httpsOptions = resolveHttpsOptions();
   const app = await NestFactory.create<NestExpressApplication>(AppModule, httpsOptions ? { httpsOptions } : {});
 
-  // CORS habilitado para que el frontend local (Vite, otro puerto) pueda llamar al API.
-  app.enableCors();
-
   const configService = app.get(ConfigService);
+
+  // CORS: lista blanca (CORS_ORIGINS). En desarrollo, sin lista, se acepta cualquier origen para que
+  // el frontend local (Vite, otro puerto o IP de la red) pueda llamar al API; en producción, sin lista,
+  // no se acepta ninguno (el frontend debe ir bajo el mismo origen, p. ej. con el proxy /api).
+  const corsOrigins = configService.get<string[]>('corsOrigins') ?? [];
+  if (corsOrigins.length > 0) {
+    app.enableCors({ origin: corsOrigins });
+  } else if (configService.get<string>('nodeEnv') !== 'production') {
+    app.enableCors();
+  }
+
+  // Cabeceras de seguridad estándar (nosniff, HSTS en HTTPS, sin X-Powered-By, etc.).
+  // `cross-origin` en CORP: el frontend puede estar en otro origen y consume el API con fetch.
+  app.use(helmet({ crossOriginResourcePolicy: { policy: 'cross-origin' } }));
 
   // Detrás del proxy de Vite / Cloudflare Tunnel todas las conexiones llegan
   // desde 127.0.0.1: sin esto el rate limit por IP del kiosco se comparte
